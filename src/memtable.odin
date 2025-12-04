@@ -65,4 +65,89 @@ compare_keys :: proc(a, b: []byte) -> int {
 	return strings.compare(string(a), string(b))
 }
 
-//TODO:Implement memtable insertion (put)
+// Insert into the memtable
+memtable_put :: proc(mt: ^Memtable, key, value: []byte) {
+	// update tracks the path that we took
+	update: [constants.MAX_LEVEL]^Node
+	current := mt.head
+
+	// 1. SEARCH: Start top, go down (The "Drop Down" Logic) 
+	for i := constants.MAX_LEVEL - 1; i >= 0; i -= 1 {
+		// While the neighbor is smaller than our new key, move forward
+		for current.next[i] != nil && compare_keys(current.next[i].key, key) < 0 {
+			current = current.next[i]
+		}
+		// We stopped. That means current.next[i] is either nil OR bigger than us.
+		// So 'current' is the node right before us.
+		update[i] = current
+	}
+
+	// Move to the exact spot on the bottom level
+	// This is to help check for duplicates
+	current = current.next[0]
+
+	// 2. CHECK DUPLICATE: If key exists, just update value
+	if current != nil && compare_keys(current.key, key) == 0 {
+		current.value = value
+		return
+	}
+
+	// 3. CREATE NODE
+	lvl := random_level()
+	new_node := new(Node, mt.allocator)
+	new_node.level = lvl
+	new_node.key = key
+	new_node.value = value
+
+	// 4. STITCH POINTERS
+	// If I am Level 3, I need to insert myself into the Local, Express, and Super Express tracks.
+
+	for i := 0; i <= lvl; i += 1 {
+		new_node.next[i] = update[i].next[i]
+		update[i].next[i] = new_node
+
+	}
+
+	// 5. Try and update the size of the memtable
+	mt.size += len(key) + len(value) + size_of(Node)
+
+
+}
+
+// Read from the memtable
+memtable_get :: proc(mt: ^Memtable, key: []byte) -> ([]byte, bool) {
+	current := mt.head
+
+	// Same search as used in memtable_put(), but there is no need for update because we are not writing any Nodes.
+	for i := constants.MAX_LEVEL - 1; i >= 0; i -= 1 {
+		// While the neighbor is smaller than our new key, move forward
+		for current.next[i] != nil && compare_keys(current.next[i].key, key) < 0 {
+			current = current.next[i]
+		}
+	}
+
+	// The search gets the item right before the item we are looking for
+	current = current.next[0]
+	if current != nil && compare_keys(current.key, key) == 0 {
+		return current.value, true
+	}
+
+	return nil, false
+}
+
+// --- DEBUG: PRINT ALL ---
+// Iterates the "Local Track" (Level 0) to prove it is sorted.
+memtable_print :: proc(mt: ^Memtable) {
+	fmt.println("--- MEMTABLE DUMP ---")
+	node := mt.head.next[0] // Skip the dummy head
+	for node != nil {
+		fmt.printf(
+			"Key: %s | Val: %s | Height: %d\n",
+			string(node.key),
+			string(node.value),
+			node.level,
+		)
+		node = node.next[0]
+	}
+	fmt.println("---------------------")
+}
