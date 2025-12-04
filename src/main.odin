@@ -1,4 +1,4 @@
-package main
+package blanche
 
 import "core:fmt"
 
