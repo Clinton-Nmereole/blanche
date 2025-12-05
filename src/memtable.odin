@@ -35,7 +35,7 @@ Memtable :: struct {
 
 memtable_init :: proc() -> ^Memtable {
 	// Allocate 4Mb of RAM for this table 
-	arena_buffer := make([]byte, constants.MB)
+	arena_buffer := make([]byte, 4 * constants.MB)
 	mt := new(Memtable)
 	mem.arena_init(&mt.arena, arena_buffer)
 	mt.allocator = mem.arena_allocator(&mt.arena)
@@ -88,16 +88,35 @@ memtable_put :: proc(mt: ^Memtable, key, value: []byte) {
 
 	// 2. CHECK DUPLICATE: If key exists, just update value
 	if current != nil && compare_keys(current.key, key) == 0 {
-		current.value = value
+		// We cannot just say current.value = value.
+		// We must allocate NEW space in the arena for the new value bytes.
+		// Note: The old value bytes are now "wasted" space in the arena. 
+		// This is normal for LSM trees; we reclaim it when we flush to disk.
+		new_value_slice := make([]byte, len(value), mt.allocator)
+		copy(new_value_slice, value)
+		current.value = new_value_slice
 		return
 	}
 
 	// 3. CREATE NODE
 	lvl := random_level()
+
+	// Instead of pointing to the incoming 'key' pointer,
+	// we ask the Arena for fresh bytes and copy the data there.
+
 	new_node := new(Node, mt.allocator)
+
+	//Make copy of key
+	new_key := make([]byte, len(key), mt.allocator)
+	copy(new_key, key)
+	new_node.key = new_key
+
+	// Make copy of value
+	new_value := make([]byte, len(value), mt.allocator)
+	copy(new_value, key)
+	new_node.value = new_value
+
 	new_node.level = lvl
-	new_node.key = key
-	new_node.value = value
 
 	// 4. STITCH POINTERS
 	// If I am Level 3, I need to insert myself into the Local, Express, and Super Express tracks.
@@ -149,5 +168,6 @@ memtable_print :: proc(mt: ^Memtable) {
 		)
 		node = node.next[0]
 	}
+	fmt.printf("Memtable Size: %d bytes of %d bytes \n", mt.size, 4 * constants.MB)
 	fmt.println("---------------------")
 }

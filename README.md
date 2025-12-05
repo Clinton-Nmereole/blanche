@@ -266,3 +266,58 @@ Summary
     Head: A permanent dummy node so we never deal with "empty list" logic.
 
     Arena: A bulk memory grab for speed and instant deletion.
+ 
+
+## Phase 2: The Write-Ahead Log (WAL)
+
+The Problem: Right now, your database is 100% in RAM (The MemTable). If you trip over the power cord, or if the program crashes (Segfault), every single "Zebra" you inserted is gone forever.
+
+The Solution: The Write-Ahead Log (WAL) is a "dumb", append-only file that lives on the hard drive. Before we touch the MemTable (RAM), we append the data to this file (Disk).
+
+    Rule: The user does not get a "Success" message until the data is safely in the WAL file.
+
+    Result: If the power goes out, we reboot, read the WAL from start to finish, and "replay" every action to rebuild the MemTable.
+
+The "Receipt Book" Analogy
+
+Imagine you run a store (The Database).
+
+    MemTable: This is the cash in your register. It changes fast. If the store burns down, the cash melts.
+
+    WAL: This is the carbon-copy receipt book. Every time you take cash, you first scribble the transaction on the receipt paper.
+
+        You never erase a line.
+
+        You never go back and edit a line.
+
+        You just write the next line at the bottom.
+
+If the store burns down, you grab the receipt book. You can calculate exactly how much money you should have had.
+The Data Format (Binary Protocol)
+
+We cannot just write text like Key:Value to the file.
+
+    Problem: What if the Value contains a colon? Or a newline? The file parser will break.
+
+    Solution: We use Length-Prefixed Binary.
+
+For every entry, we write exactly 4 distinct chunks of data packed together:
+
+    Key Length (4 bytes, Little Endian integer)
+
+    Value Length (4 bytes, Little Endian integer)
+
+    Key Data (The actual bytes)
+
+    Value Data (The actual bytes)
+
+Example: Key: "Cat" (3 bytes), Value: "Meow" (4 bytes).
+
+The file on disk will look like this hexadecimal stream:
+Plaintext
+
+[03 00 00 00] [04 00 00 00] [43 61 74] [4D 65 6F 77]
+^             ^             ^          ^
+Key Len (3)   Val Len (4)   "Cat"      "Meow"
+
+
