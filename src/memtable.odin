@@ -35,7 +35,7 @@ Memtable :: struct {
 
 memtable_init :: proc() -> ^Memtable {
 	// Allocate 4Mb of RAM for this table 
-	arena_buffer := make([]byte, 4 * constants.MB)
+	arena_buffer := make([]byte, 5 * constants.MB)
 	mt := new(Memtable)
 	mem.arena_init(&mt.arena, arena_buffer)
 	mt.allocator = mem.arena_allocator(&mt.arena)
@@ -170,4 +170,17 @@ memtable_print :: proc(mt: ^Memtable) {
 	}
 	fmt.printf("Memtable Size: %d bytes of %d bytes \n", mt.size, 4 * constants.MB)
 	fmt.println("---------------------")
+}
+
+// Clear memtable from RAM
+memtable_clear :: proc(mt: ^Memtable) {
+	mem.arena_free_all(&mt.arena)
+
+	// We wiped the Head node too! We must recreate it.
+	mt.head = new(Node, mt.allocator)
+	mt.head.level = constants.MAX_LEVEL
+
+	// Reset size counter
+	mt.size = 0
+
 }

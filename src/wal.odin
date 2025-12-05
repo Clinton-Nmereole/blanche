@@ -26,7 +26,7 @@ wal_init :: proc(filename: string) -> (^WAL, bool) {
 	wal.filename = filename
 
 	// open a file with read,write, create and append permissions.
-	handle, err := os.open(filename, os.O_RDWR | os.O_CREATE | os.O_APPEND, 0o064)
+	handle, err := os.open(filename, os.O_RDWR | os.O_CREATE | os.O_APPEND, 0o644)
 
 	if err != os.ERROR_NONE {
 		fmt.printf("Error opening WAL: %v\n", err)
@@ -81,5 +81,53 @@ wal_append :: proc(wal: ^WAL, key, value: []byte) -> bool {
 	os.flush(wal.file)
 
 	return true
+
+}
+
+// Recover from WAL
+wal_recover :: proc(wal: ^WAL, mt: ^Memtable) {
+	// Read from the start of the file
+	// We need to set the starting position at 0
+	os.seek(wal.file, 0, os.SEEK_SET)
+
+	// Loop until the end of the file
+	for {
+		header: [8]byte
+		bytes_read, err := os.read(wal.file, header[:])
+
+		//if no bytes are read, exit the loop
+		if bytes_read == 0 {break}
+
+		//if we read partial bytes, then the header is corrupted and recovery is not possible
+		if bytes_read < 8 {
+			fmt.println("The WAL is corrupted, recovery is not possible")
+			break // stop loop
+		}
+
+		// If the none of the above if statements are true, we know it is okay to read the key-value.
+		// First we need to decode the length of the key and value from little endian bytes back to integers.
+		key_length, _ := endian.get_u32(header[0:4], endian.Byte_Order.Little)
+		value_length, _ := endian.get_u32(header[4:], endian.Byte_Order.Little)
+
+		// Read the key 
+		// We allocate a temporary buffer
+		key_buffer := make([]byte, key_length)
+		defer delete(key_buffer)
+		os.read(wal.file, key_buffer)
+
+		// Read the value
+		// Same as with key, we allocate a temporary buffer for the read
+		value_buffer := make([]byte, value_length)
+		defer delete(value_buffer)
+		os.read(wal.file, value_buffer)
+
+		//Replay into MemTable
+		// This simulates the user typing this data in again.
+		memtable_put(mt, key_buffer, value_buffer)
+
+	}
+
+	//Move cursor back to the end of the file so that we append to the end of the file and not write in the middle possibly
+	os.seek(wal.file, 0, os.SEEK_END)
 
 }
