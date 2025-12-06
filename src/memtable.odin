@@ -35,7 +35,7 @@ Memtable :: struct {
 
 memtable_init :: proc() -> ^Memtable {
 	// Allocate 4Mb of RAM for this table 
-	arena_buffer := make([]byte, 5 * constants.MB)
+	arena_buffer := make([]byte, 6 * constants.MB)
 	mt := new(Memtable)
 	mem.arena_init(&mt.arena, arena_buffer)
 	mt.allocator = mem.arena_allocator(&mt.arena)
@@ -121,7 +121,7 @@ memtable_put :: proc(mt: ^Memtable, key, value: []byte) {
 	// 4. STITCH POINTERS
 	// If I am Level 3, I need to insert myself into the Local, Express, and Super Express tracks.
 
-	for i := 0; i <= lvl; i += 1 {
+	for i := 0; i < lvl; i += 1 {
 		new_node.next[i] = update[i].next[i]
 		update[i].next[i] = new_node
 

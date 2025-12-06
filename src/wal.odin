@@ -78,7 +78,7 @@ wal_append :: proc(wal: ^WAL, key, value: []byte) -> bool {
 		return false
 	}
 
-	os.flush(wal.file)
+	//os.flush(wal.file) //TODO:THis is apparently a costly operation so we might not want to do this on every append.
 
 	return true
 
