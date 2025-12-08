@@ -5,6 +5,7 @@ import "core:encoding/endian"
 import "core:fmt"
 import "core:mem"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "core:time"
 
@@ -12,6 +13,7 @@ DB :: struct {
 	memtable:       ^Memtable,
 	wal:            ^WAL,
 	data_directory: string,
+	sst_files:      [dynamic]string,
 }
 
 // CONSTANT: When do we freeze and flush? (4MB)
@@ -26,6 +28,34 @@ db_open :: proc(dir: string) -> ^DB {
 
 	db := new(DB)
 	db.data_directory = dir
+
+	// Load the list of names of the .sst files into db.sstables 
+	// So open a os.Handle with Read only into the directory
+	// Loop through every file in the directory
+	// If the file has a .sst extension, get its name and save it to the dynamic array
+	d, err := os.open(dir, os.O_RDONLY)
+	if err == os.ERROR_NONE {
+		defer os.close(d)
+
+		infos, _ := os.read_dir(d, -1)
+
+		for info in infos {
+			// Check if the file ends in .sst
+			if !info.is_dir && strings.has_suffix(info.name, ".sst") {
+				// Construct full path "data/123.sst"
+				full_path := fmt.tprintf("%s/%s", dir, info.name)
+				append(&db.sst_files, full_path)
+			}
+		}
+		// SORT THEM! 
+		// We want Newest files first. 
+		// Since our names are timestamps (100.sst, 200.sst), 
+		// we can sort strings in Descending order (Big numbers first).
+
+		slice.sort(db.sst_files[:])
+		slice.reverse(db.sst_files[:])
+	}
+
 
 	// initialize memtable
 	db.memtable = memtable_init()
@@ -68,6 +98,33 @@ db_put :: proc(db: ^DB, key, value: []byte) {
 		//this is where we flush to sst
 		sstable_flush(db)
 	}
+
+}
+
+db_get :: proc(db: ^DB, key: []byte) -> ([]byte, bool) {
+
+	// First we would like to check if the key is in the memtable
+	val_memtable, memtable_found := memtable_get(db.memtable, key)
+	if memtable_found {
+		return val_memtable, memtable_found
+	}
+
+	// Use sstable_find to check the newest .sst file and then check subsequent .sst files after that
+	// Loop through all the sorted sst_files in the db since they are sorted in reverse order,
+	// we are looking at the newest entries first
+
+	for sstable in db.sst_files {
+
+		val_sstable, sstable_found := sstable_find(sstable, key)
+		if sstable_found {
+			return val_sstable, sstable_found
+		}
+
+	}
+
+
+	return nil, false
+
 
 }
 
@@ -124,6 +181,8 @@ sstable_flush :: proc(db: ^DB) {
 		return
 	}
 
+	append(&db.sst_files, filename)
+
 	// 3. WRITE THE DATA (The heavy lifting)
 	// We will implement this detailed binary encoding in a moment.
 	keys_count := sstable_write_file(file, db.memtable)
@@ -138,7 +197,12 @@ sstable_flush :: proc(db: ^DB) {
 	os.remove(db.wal.filename)
 
 	// Re-open fresh WAL
-	db.wal, _ = wal_init(db.wal.filename)
+	new_wal, ok := wal_init(db.wal.filename)
+	if !ok {
+		fmt.println("!!! FATAL: Could not create new WAL after flush !!!")
+
+	}
+	db.wal = new_wal
 
 }
 
@@ -266,4 +330,145 @@ sstable_write_file :: proc(file: os.Handle, mt: ^Memtable) -> int {
 
 
 	return counter
+}
+
+// We need a function that takes a filename and a key, and returns the value (or not found)
+
+sstable_find :: proc(filename: string, key: []byte) -> ([]byte, bool) {
+
+	// First we open the file
+	file, err := os.open(filename, os.O_RDONLY)
+	if err != os.ERROR_NONE {return nil, false}
+	defer os.close(file)
+
+	// Check if the file is corrupted
+	file_size, _ := os.file_size(file)
+
+	if file_size < 8 {
+		fmt.printf("The file %s is corrupted and could not be read", filename)
+		return nil, false
+	}
+
+
+	// --- STEP 1: READ FOOTER ---
+	// Seek to the last 8 bytes
+	os.seek(file, -8, os.SEEK_END)
+	footer_buffer: [8]byte
+	os.read(file, footer_buffer[:])
+	index_offset, _ := endian.get_u64(footer_buffer[:], endian.Byte_Order.Little)
+
+	// Seek to the index offset 
+	os.seek(file, i64(index_offset), os.SEEK_SET)
+
+	start_search_offset: i64 = 0
+	current_position := i64(index_offset)
+
+	// Now we want to read each key from the index section of the form [key length] [key_data] [offset]
+	// Check for a suitable start position by comparing the key being searched with key data
+	// if the key is smaller, we will set our start_search_offset value equal to the offset value contained in our index block
+	// if we eventually find a larger key, we should stop and possibly set a value end_search_offset to that offset
+	// the reason I think this is a good idea is that if the we get a start_search_offset of say 500th entry, but our block 1 
+	// contains 5000 records, we don't want to search the entire store of 4500 other entries until we get back to index block
+	// We want to get an end_search_offset that says we know  the key is less than the 1000th entry.
+	// This way we only read 500 entries before saying we didn't find the key rather than 4500 entries.
+
+	// Looping through index block up until the footer
+	for current_position < (file_size - 8) {
+		// Read the key length 
+		klen_buf: [4]byte
+		os.read(file, klen_buf[:])
+		klen, _ := endian.get_u32(klen_buf[:], endian.Byte_Order.Little)
+		current_position += 4
+
+		// Read the key data
+		key_buf := make([]byte, klen)
+		os.read(file, key_buf[:])
+		current_position += i64(klen)
+
+		// Read Offset
+		offset_buf: [8]byte
+		os.read(file, offset_buf[:])
+		offset, _ := endian.get_u32(offset_buf[:], endian.Byte_Order.Little)
+		current_position += 8
+
+		// Compare to find key
+		cmp := compare_keys(key_buf, key)
+		delete(key_buf) // clean key_buf from heap
+
+		if cmp <= 0 {
+			start_search_offset += i64(offset)
+		} else {
+			//end_search_offset += i64(offset)
+			break
+		}
+
+	}
+
+	// Ok, Jump to the start_search_offset or the O and read till the end_search_offset
+	os.seek(file, start_search_offset, os.SEEK_SET)
+	curr := start_search_offset
+
+	// Interesting, but if the item being searched is larger than the largest index, end_search_offset will remain 0
+	// if we try to loop while curr < end_search_offset, we will have a situation like while 500 < 0 which means the search will fail.
+	// So we can do if statement that if end_search_offset < start_search_offset, then we search till the end of index block
+	// else we search from start_search_offset to end_search_offset. I'm not exactly sure the performance benefits but
+	// But does this even matter? if the end_search_offset is a value we only search the entire array block if the searched 
+	// key is not in the database. If it is in the database we will find it in the index length window anyway.
+	// So end_search_offset only improves the worst case scenario, which is that the key is not in the database
+	// Example we have indexes "Apple", "Ball", "Box", "Cat", "Cube", "Date", ... "Monkey"... "Zebra" and we are looking for "Condo" but "Condo"
+	// is not in block 1, we will start from "Cat" and search till the end of block 1. However, with end_search_offset we can tell the user it is not
+	// in the database once we hit the position of "Cube", so we are faster at telling the user "not found".
+	// There is no difference however, if "Condo" is in the database/file
+
+	// Well just realized that end_search_offset is not needed because of the sorted nature of the database, if we are searching for a key and 
+	// ever come across a key in the database larger than the key being searched for we can just stop the search because the key being searched for is 
+	// not in the database. So forget the ramblings above.
+
+	for curr < i64(index_offset) {
+		// read the key length
+		klen_byte: [4]byte
+		_, err := os.read(file, klen_byte[:])
+		if err != nil {break}
+		klen, _ := endian.get_u32(klen_byte[:], endian.Byte_Order.Little)
+		curr += 4
+
+		// read the actual key
+		found_key := make([]byte, klen)
+		os.read(file, found_key[:])
+		curr += i64(klen)
+
+		// read the value length
+		vlen_byte: [4]byte
+		os.read(file, vlen_byte[:])
+		vlen, _ := endian.get_u32(vlen_byte[:], endian.Byte_Order.Little)
+		curr += 4
+
+		// read the actual value 
+		found_value := make([]byte, vlen)
+		os.read(file, found_value[:])
+		curr += i64(vlen)
+
+		// Check if the found key is equal to the key being searched
+		cmp := compare_keys(found_key, key)
+		// clean up found_key allocated with make, we don't need it anymore
+		delete(found_key)
+		if cmp == 0 {
+			// We found the key
+			return found_value, true
+		}
+		if cmp > 0 {
+			// We found a key greater than the key being searched, since the database is sorted we can end search
+			// because that means the key is not in the database
+			delete(found_value) // since the key is not in the database clean up found_value allocated with make
+			return nil, false
+		}
+
+		delete(found_value) // clean up in the case that we are still searching (we haven't found the key yet)
+
+
+	}
+
+
+	return nil, false
+
 }

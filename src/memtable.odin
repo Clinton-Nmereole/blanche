@@ -113,7 +113,7 @@ memtable_put :: proc(mt: ^Memtable, key, value: []byte) {
 
 	// Make copy of value
 	new_value := make([]byte, len(value), mt.allocator)
-	copy(new_value, key)
+	copy(new_value, value)
 	new_node.value = new_value
 
 	new_node.level = lvl

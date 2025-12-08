@@ -2,6 +2,7 @@ package blanche
 
 import "core:fmt"
 import "core:os"
+import "core:strings"
 
 main :: proc() {
 	/* ======== Test for Memtable ========
@@ -89,6 +90,7 @@ main :: proc() {
 	}
     */
 
+	/*
 	// --- SETUP ---
 	// ====== Test for DB =========
 	// Manually clear old data to ensure a clean test
@@ -160,6 +162,105 @@ main :: proc() {
 		fmt.println("\nFAILURE: Loop finished but no flush detected.")
 		fmt.println("Did we reach the 4MB threshold?")
 		fmt.printf("Final Size: %d\n", db.memtable.size)
+	}
+    */
+
+	// ===== Test for DB search =====//
+	// --- 1. SETUP ---
+	// Start fresh so we know exactly what is on disk
+	fmt.println("--- SETUP: Cleaning Data Folder ---")
+	os.remove("data/wal.log")
+	// Note: Ideally delete all .sst files manually if you want a purely clean test, 
+	// but this logic works even if old files exist (they just get ignored or sorted to back).
+
+	db := db_open("data")
+	defer db_close(db)
+
+	// --- 2. BURY THE TREASURE ---
+	fmt.println("\n--- STEP 1: Burying the Treasure ---")
+	treasure_key := transmute([]byte)string("Gold_Bar")
+	treasure_val := transmute([]byte)string("Value_1000_Dollars")
+
+	db_put(db, treasure_key, treasure_val)
+	fmt.println("Inserted 'Gold_Bar' into MemTable.")
+
+	// --- 3. FORCE FLUSH (Pour Concrete) ---
+	fmt.println("\n--- STEP 2: Flooding MemTable to force Flush ---")
+	fmt.printf("Target Threshold: %d bytes\n", MEMTABLE_THRESHOLD)
+
+	// We create a 1KB junk payload
+	junk_val := make([]byte, 1024, context.allocator)
+	defer delete(junk_val)
+	for i := 0; i < 1024; i += 1 {junk_val[i] = 'X'}
+
+	flush_happened := false
+
+	// Loop until we detect the size drop
+	for i := 0; i < 10000; i += 1 {
+		size_before := db.memtable.size
+
+		// Key doesn't matter, just filling space
+		key := transmute([]byte)fmt.tprintf("Junk:%d", i)
+		db_put(db, key, junk_val)
+
+		if db.memtable.size < size_before {
+			fmt.println("!!! FLUSH DETECTED !!!")
+			fmt.println("The 'Gold_Bar' has been moved from RAM to Disk.")
+			flush_happened = true
+			break
+		}
+	}
+
+	if !flush_happened {
+		fmt.println(
+			"TEST FAILED: Could not force a flush. Lower your threshold or increase loop count.",
+		)
+		return
+	}
+
+	// --- 4. THE EXCAVATION (The Actual Test) ---
+	fmt.println("\n--- STEP 3: The Excavation (db_get) ---")
+
+	// Sanity Check: Is it really gone from RAM?
+	// We manually check MemTable first just to prove a point
+	_, in_ram := memtable_get(db.memtable, treasure_key)
+	if !in_ram {
+		fmt.println("Confirmed: 'Gold_Bar' is NOT in MemTable.")
+	} else {
+		fmt.println("WARNING: 'Gold_Bar' is still in MemTable? Test result might be fake.")
+	}
+
+	// NOW CALL THE REAL GET
+	fmt.println("Calling db_get('Gold_Bar')...")
+	val, found := db_get(db, treasure_key)
+
+	if found {
+		result_str := string(val)
+		if result_str == "Value_1000_Dollars" {
+			fmt.println("\nSUCCESS! You found the treasure on Disk!")
+			fmt.println("Flow Verified: db_get -> sstable_find -> Footer -> Index -> Data Block")
+		} else {
+			fmt.printf("\nFAILURE: Found key, but wrong value! Got: '%s'\n", result_str)
+		}
+	} else {
+		fmt.println("\nFAILURE: db_get returned 'Not Found'.")
+		fmt.println("Check: Did sstable_find return false? Did the Index Scan fail?")
+	}
+
+	// --- 5. VERSIONING TEST (Bonus) ---
+	// Test if MemTable shadows Disk
+	fmt.println("\n--- STEP 4: Shadowing Test ---")
+	fmt.println("Inserting NEW version of 'Gold_Bar' into RAM...")
+	new_val := transmute([]byte)string("Value_0_Dollars_Fake")
+	db_put(db, treasure_key, new_val)
+
+	val2, found2 := db_get(db, treasure_key)
+	if string(val2) == "Value_0_Dollars_Fake" {
+		fmt.println("SUCCESS: MemTable correctly overrode the Disk version.")
+	} else {
+		fmt.println(
+			"FAILURE: db_get returned the old Disk version instead of the new RAM version.",
+		)
 	}
 
 }
