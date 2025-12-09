@@ -3,6 +3,7 @@ package blanche
 import "core:encoding/endian"
 import "core:fmt"
 import "core:os"
+import "core:time"
 
 // Well basically what the compaction phase does is merge old sst files into a new "master" sst file
 // We then delete all the other old files
@@ -49,8 +50,7 @@ sstable_iterator_init :: proc(filename: string) -> ^SSTableIterator {
 	// Prime the pump: Read the first entry immediately
 	os.seek(file, 0, os.SEEK_SET)
 
-	//TODO: Write sstable_iterator_next function
-	// sstable_iterator_next(it)
+	sstable_iterator_next(it)
 
 	return it
 
@@ -102,8 +102,8 @@ sstable_iterator_next :: proc(it: ^SSTableIterator) {
 // 3. Cleanup
 sstable_iterator_close :: proc(it: ^SSTableIterator) {
 	os.close(it.file)
-	if it.key != nil {delete(it.key)}
-	if it.value != nil {delete(it.value)}
+	//if it.key != nil {delete(it.key)}
+	//if it.value != nil {delete(it.value)}
 	free(it)
 }
 
@@ -118,11 +118,21 @@ db_compact :: proc(db: ^DB) {
 	// since sstable_files is sorted, iterators[0] will always be the most recent file
 
 	for filename in db.sst_files {
+		fmt.printf("Attempting to open iterator for: %s\n", filename) // <--- DEBUG 1
 		it := sstable_iterator_init(filename)
 		if it.valid {
+			fmt.println(" -> Success: Iterator Valid.") // <--- DEBUG 2
 			append(&iterators, it)
+		} else {
+			fmt.println(" -> FAILURE: Iterator Invalid!") // <--- DEBUG 3
 		}
 
+	}
+	fmt.printf("Total Active Iterators: %d\n", len(iterators)) // <--- DEBUG 4
+
+	if len(iterators) == 0 {
+		fmt.println("EXITING: No valid iterators found.")
+		return
 	}
 
 	// We are going to make a file which is what we will write to, we will also open this in the data folder
@@ -134,19 +144,80 @@ db_compact :: proc(db: ^DB) {
 
 	//find the minimum key
 	for {
-		min_key: []byte = nil
+		best_key_ref: []byte = nil
 		for it in iterators {
 			if it.valid {
-				if min_key == nil || compare_keys(it.key, min_key) < 0 {
-					min_key = it.key
+				if best_key_ref == nil || compare_keys(it.key, best_key_ref) < 0 {
+					best_key_ref = it.key
 				}
 			}
 		}
 
-		if min_key == nil {break}
+		if best_key_ref == nil {break}
+
+		min_key := make([]byte, len(best_key_ref))
+		copy(min_key, best_key_ref)
+		defer delete(min_key) // Clean up at the end of this loop iteration
+		// DEBUG 1: Print who the current "Min Key" is
+		fmt.printf("Loop: Min Key is '%s'\n", string(min_key))
 
 		// B. Pick the Winner & Advance Duplicates
+
+		found_winner := false
+
+		for it in iterators { 	//loop through all the iterators 
+			if it.valid && compare_keys(it.key, min_key) == 0 { 	// if they are valid and have the smallest key
+
+				if !found_winner { 	// Check if we have found the winner, if not, feed it to the builder.
+					// DEBUG 2: Print who won
+					fmt.printf(
+						" -> Winner Found! Value: '%s' (Writing to builder)\n",
+						string(it.value),
+					)
+					builder_add(builder, it.key, it.value) // iterators is sorted, so the first it which is a winner is the most recent
+					found_winner = true
+
+
+				} else {
+					// DEBUG 3: Print who got skipped
+					fmt.printf(" -> Duplicate Skipped! Value: '%s'\n", string(it.value))
+				}
+
+				sstable_iterator_next(it) // Move to the next item on all iterators that have the winner value
+
+
+			}
+		}
 	}
+
+	// Finish builder
+	// Write Index and Footer and then close the file
+	builder_finish(builder)
+
+	// Now since we have a new compacted file, we get rid of all the other files
+	for it in iterators {
+		sstable_iterator_close(it)
+	}
+
+	for filename in db.sst_files {
+		os.remove(filename)
+	}
+
+	//Rename the Temp File
+	// We give it a new timestamp name so it looks like a normal SSTable
+	new_timestamp := time.to_unix_nanoseconds(time.now())
+	new_filename := fmt.tprintf("%s/%d.sst", db.data_directory, new_timestamp)
+
+	os.rename(temp_filename, new_filename)
+
+	// Clear the old files from out db
+	clear(&db.sst_files)
+
+	// Append the new file
+	append(&db.sst_files, new_filename)
+
+	// Success Message
+	fmt.printf("Compaction Complete. Merged into: %s\n", new_filename)
 
 
 }

@@ -183,6 +183,10 @@ sstable_flush :: proc(db: ^DB) {
 
 	append(&db.sst_files, filename)
 
+	// sort
+	slice.sort(db.sst_files[:])
+	slice.reverse(db.sst_files[:])
+
 	// 3. WRITE THE DATA (The heavy lifting)
 	// We will implement this detailed binary encoding in a moment.
 	keys_count := sstable_write_file(file, db.memtable)
@@ -208,7 +212,6 @@ sstable_flush :: proc(db: ^DB) {
 
 // How often do we save a shortcut? 
 // 100 means we only index every 100th key.
-SPARSE_FACTOR :: 100
 
 // A temporary struct to hold index entries in RAM
 IndexEntry :: struct {

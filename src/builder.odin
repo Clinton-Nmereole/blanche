@@ -16,8 +16,8 @@ SSTableBuilder :: struct {
 builder_init :: proc(filename: string) -> ^SSTableBuilder {
 	b := new(SSTableBuilder)
 
-	// Open with Truncate. 
-	// "Why Truncate?" If the file exists (maybe from a failed previous run), 
+	// Open with Truncate.
+	// "Why Truncate?" If the file exists (maybe from a failed previous run),
 	// we want to wipe it and start fresh, not append to garbage.
 	f, err := os.open(filename, os.O_WRONLY | os.O_CREATE | os.O_TRUNC, 0o644)
 
@@ -37,7 +37,7 @@ builder_init :: proc(filename: string) -> ^SSTableBuilder {
 
 builder_add :: proc(b: ^SSTableBuilder, key, value: []byte) {
 
-	if b.item_count == SPARSE_FACTOR % 100 {
+	if b.item_count % SPARSE_FACTOR == 0 {
 		key_copy := make([]byte, len(key))
 		copy(key_copy, key)
 		append(&b.index_list, IndexEntry{key = key_copy, offset = b.current_offset})
@@ -78,7 +78,7 @@ builder_finish :: proc(b: ^SSTableBuilder) {
 	for entry in b.index_list {
 		// write key length
 		key_len: [4]byte
-		endian.put_u64(key_len[:], endian.Byte_Order.Little, u64(len(entry.key)))
+		endian.put_u32(key_len[:], endian.Byte_Order.Little, u32(len(entry.key)))
 		os.write(b.file, key_len[:])
 
 		// write key
@@ -91,6 +91,7 @@ builder_finish :: proc(b: ^SSTableBuilder) {
 		os.write(b.file, offset_bytes[:])
 		delete(entry.key) //remember that we are making deep copies of key when we initially put it in index_list, this frees that memory.
 	}
+	delete(b.index_list)
 
 	// Write the footer
 	footer_buf: [8]byte

@@ -165,6 +165,8 @@ main :: proc() {
 	}
     */
 
+
+	/*
 	// ===== Test for DB search =====//
 	// --- 1. SETUP ---
 	// Start fresh so we know exactly what is on disk
@@ -262,5 +264,104 @@ main :: proc() {
 			"FAILURE: db_get returned the old Disk version instead of the new RAM version.",
 		)
 	}
+    */
+
+
+	// ==== Compaction Test ====
+	// --- 1. SETUP ---
+
+	fmt.println("--- PHASE 5 TEST: Compaction ---")
+
+	// Clean start
+	os.remove("data/wal.log")
+	// Note: For a true clean test, manually delete the 'data' folder or all .sst files before running
+	// rm -rf data/*.sst 
+
+	db := db_open("data")
+	defer db_close(db)
+
+	key := transmute([]byte)string("User:1")
+
+	// --- 2. CREATE FRAGMENTATION (The Mess) ---
+	// We want 3 separate files on disk. 
+	// Instead of waiting for the 4MB limit, we manually call flush() 
+	// to force tiny files.
+
+	fmt.println("\nStep 1: Creating 3 separate SSTable files...")
+
+	// Version 1 (Oldest)
+	fmt.println(" -> Writing Version 1 (Alice)... Flushing.")
+	db_put(db, key, transmute([]byte)string("Alice_v1"))
+	sstable_flush(db) // Force create File #1
+
+	// Version 2 (Middle)
+	fmt.println(" -> Writing Version 2 (Bob)... Flushing.")
+	db_put(db, key, transmute([]byte)string("Bob_v2"))
+	sstable_flush(db) // Force create File #2
+
+	// Version 3 (Newest)
+	fmt.println(" -> Writing Version 3 (Charlie)... Flushing.")
+	db_put(db, key, transmute([]byte)string("Charlie_v3"))
+	sstable_flush(db) // Force create File #3
+
+	// --- 3. VERIFY MESSY STATE ---
+	file_count := len(db.sst_files)
+	fmt.printf("\nStep 2: verifying Pre-Compaction State. File Count: %d\n", file_count)
+
+	if file_count < 3 {
+		fmt.println("FAILURE: Expected at least 3 SSTable files. Did sstable_flush work?")
+		return
+	}
+
+	// Verify we can read the newest version (Charlie) even with multiple files
+	val, found := db_get(db, key)
+	if !found || string(val) != "Charlie_v3" {
+		fmt.printf(
+			"FAILURE: Read before compaction failed. Expected 'Charlie_v3', got '%s'\n",
+			string(val),
+		)
+		return
+	}
+	fmt.println(" -> Read Check Passed: Got 'Charlie_v3' (Reading from Newest SST)")
+
+	// --- 4. RUN COMPACTION (The Cleanup) ---
+	fmt.println("\nStep 3: Running db_compact()...")
+	db_compact(db)
+
+	// --- 5. VERIFY CLEAN STATE ---
+	new_file_count := len(db.sst_files)
+	fmt.printf("\nStep 4: Verifying Post-Compaction State. File Count: %d\n", new_file_count)
+
+	// CHECK A: File Count
+	if new_file_count != 1 {
+		fmt.printf(
+			"FAILURE: Compaction didn't reduce file count! Still have %d files.\n",
+			new_file_count,
+		)
+		return
+	} else {
+		fmt.println(" -> SUCCESS: Collapsed into exactly 1 file.")
+	}
+
+	// CHECK B: Data Integrity
+	// Does "User:1" still equal "Charlie_v3"? 
+	// If compaction logic was wrong, it might have kept "Alice" (Oldest) or lost the key entirely.
+	val_post, found_post := db_get(db, key)
+
+	if !found_post {
+		fmt.println("FAILURE: The key disappeared after compaction!")
+		return
+	}
+
+	if string(val_post) == "Charlie_v3" {
+		fmt.println(" -> SUCCESS: Data Integrity preserved. 'Charlie_v3' survived.")
+	} else {
+		fmt.printf(
+			"FAILURE: Wrong version survived! Expected 'Charlie_v3', got '%s'\n",
+			string(val_post),
+		)
+	}
+
+	fmt.println("\n--- TEST COMPLETE: COMPACTION WORKS ---")
 
 }
