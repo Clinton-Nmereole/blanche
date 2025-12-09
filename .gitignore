@@ -1,0 +1,3 @@
+build/
+*.exe
+.DS_Store
