@@ -3,6 +3,21 @@ package blanche
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:time"
+
+benchmark_negative_lookups :: proc(db: ^DB) {
+	start_time := time.now()
+	for i := 0; i < 10000; i += 1 {
+		found, is_in := db_get(db, transmute([]byte)string("No One"))
+
+		if is_in {
+			fmt.println("This was the value of the searched key: ", found)
+		}
+	}
+	duration := time.diff(start_time, time.now())
+	fmt.printf("Duration: %v\n", duration)
+
+}
 
 main :: proc() {
 	/* ======== Test for Memtable ========
@@ -267,6 +282,7 @@ main :: proc() {
     */
 
 
+	/*
 	// ==== Compaction Test ====
 	// --- 1. SETUP ---
 
@@ -363,5 +379,95 @@ main :: proc() {
 	}
 
 	fmt.println("\n--- TEST COMPLETE: COMPACTION WORKS ---")
+    */
+    */
+
+	/*
+	// ==== BLOOM FILTER TEST ====
+	// Initialize a bloom filter
+	filter := bloomfilter_init(10, 0.1)
+	found := contains(filter, transmute([]u8)string("test_key"))
+	fmt.println("The value returned from contains is: ", found)
+	add(filter, transmute([]byte)string("apple"))
+	found = contains(filter, transmute([]byte)string("apple"))
+	fmt.println(
+		"The value returned from contains after inserting 'apple' in the filter and searching for it is: ",
+		found,
+	)
+	// We added "apple" earlier...
+	result := contains(filter, transmute([]u8)(string("banana")))
+
+	fmt.println(
+		"The value returned from contains after inserting 'banana' in the filter and searching for it is: ",
+		result,
+	)
+    */
+
+	// ===== Benchmarking Bloom Filter =====//
+	// --- 1. SETUP ---
+	// Start fresh so we know exactly what is on disk
+	fmt.println("--- SETUP: Cleaning Data Folder ---")
+	os.remove("data/wal.log")
+	// Note: Ideally delete all .sst files manually if you want a purely clean test, 
+	// but this logic works even if old files exist (they just get ignored or sorted to back).
+
+	db := db_open("data")
+	defer db_close(db)
+
+	// --- 2. BURY THE TREASURE ---
+	fmt.println("\n--- STEP 1: Burying the Treasure ---")
+	treasure_key := transmute([]byte)string("Gold_Bar")
+	treasure_val := transmute([]byte)string("Value_1000_Dollars")
+
+	db_put(db, treasure_key, treasure_val)
+	fmt.println("Inserted 'Gold_Bar' into MemTable.")
+
+	// --- 3. FORCE FLUSH (Pour Concrete) ---
+	fmt.println("\n--- STEP 2: Flooding MemTable to force Flush ---")
+	fmt.printf("Target Threshold: %d bytes\n", MEMTABLE_THRESHOLD)
+
+	// We create a 1KB junk payload
+	junk_val := make([]byte, 1024, context.allocator)
+	defer delete(junk_val)
+	for i := 0; i < 1024; i += 1 {junk_val[i] = 'X'}
+
+	flush_happened := false
+
+	// Loop until we detect the size drop
+	for i := 0; i < 10000; i += 1 {
+		size_before := db.memtable.size
+
+		// Key doesn't matter, just filling space
+		key := transmute([]byte)fmt.tprintf("Junk:%d", i)
+		db_put(db, key, junk_val)
+
+		if db.memtable.size < size_before {
+			fmt.println("!!! FLUSH DETECTED !!!")
+			fmt.println("The 'Gold_Bar' has been moved from RAM to Disk.")
+			flush_happened = true
+			break
+		}
+	}
+
+
+	benchmark_negative_lookups(db)
+
+	// --- 4. DIG UP THE TREASURE ---
+	fmt.println("\n--- STEP 3: Retrieve the Gold ---")
+	val, found := db_get(db, treasure_key)
+
+	if found {
+		fmt.printf(
+			"Success! 🏴‍☠️ Found key '%s' with value: '%s'\n",
+			string(treasure_key),
+			string(val),
+		)
+	} else {
+		fmt.printf(
+			"FAILURE ☠️. The Bloom Filter let us through, but the key '%s' was not found on disk.\n",
+			string(treasure_key),
+		)
+	}
+
 
 }

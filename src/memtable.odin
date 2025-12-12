@@ -29,6 +29,7 @@ Memtable :: struct {
 	arena:     mem.Arena, // The block of memory that we allocate from
 	allocator: mem.Allocator, // The interface for the arena
 	size:      int, // Approximate size in bytes (To know when to flush Arena)
+	count:     int, // How many keys are in the memtable
 }
 
 //Initialize Memtable
@@ -129,6 +130,7 @@ memtable_put :: proc(mt: ^Memtable, key, value: []byte) {
 
 	// 5. Try and update the size of the memtable
 	mt.size += len(key) + len(value) + size_of(Node)
+	mt.count += 1
 
 
 }
@@ -182,5 +184,6 @@ memtable_clear :: proc(mt: ^Memtable) {
 
 	// Reset size counter
 	mt.size = 0
+	mt.count = 0
 
 }

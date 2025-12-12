@@ -7,13 +7,21 @@ import "core:mem"
 import "core:os"
 import "core:slice"
 import "core:strings"
+import "core:sync"
 import "core:time"
+
+
+SSTableHandle :: struct {
+	filename: string,
+	filter:   ^BLOOMFILTER,
+}
 
 DB :: struct {
 	memtable:       ^Memtable,
 	wal:            ^WAL,
 	data_directory: string,
-	sst_files:      [dynamic]string,
+	sst_files:      [dynamic]SSTableHandle,
+	mutex:          sync.Mutex,
 }
 
 // CONSTANT: When do we freeze and flush? (4MB)
@@ -44,7 +52,20 @@ db_open :: proc(dir: string) -> ^DB {
 			if !info.is_dir && strings.has_suffix(info.name, ".sst") {
 				// Construct full path "data/123.sst"
 				full_path := fmt.tprintf("%s/%s", dir, info.name)
-				append(&db.sst_files, full_path)
+
+				// Construct the filter path
+				filter_path := strings.trim_suffix(full_path, ".sst")
+				filter_path = fmt.tprintf("%s.filter", filter_path)
+				file_filter: ^BLOOMFILTER
+
+				// Load the filter from file
+				if os.is_file(filter_path) {
+
+					file_filter = load_filter_from_file(filter_path)
+
+				}
+
+				append(&db.sst_files, SSTableHandle{filename = full_path, filter = file_filter})
 			}
 		}
 		// SORT THEM! 
@@ -52,7 +73,9 @@ db_open :: proc(dir: string) -> ^DB {
 		// Since our names are timestamps (100.sst, 200.sst), 
 		// we can sort strings in Descending order (Big numbers first).
 
-		slice.sort(db.sst_files[:])
+		slice.sort_by(db.sst_files[:], proc(a, b: SSTableHandle) -> bool {
+			return a.filename < b.filename
+		})
 		slice.reverse(db.sst_files[:])
 	}
 
@@ -85,12 +108,16 @@ db_close :: proc(db: ^DB) {
 db_put :: proc(db: ^DB, key, value: []byte) {
 	// Steps:
 	// 1. First write to WAL and let the user know if it fails
+	// Now we add to the bloom filter before the memtable
 	// 2. Write to the memtable.
 	// 3. Check if the memtable size is at the threshold, and if it is, then write to file.
 
 	if !wal_append(db.wal, key, value) {
 		fmt.println("Failed to append to WAL.")
 	}
+
+	//Add the key to the bloomfilter
+
 
 	memtable_put(db.memtable, key, value)
 
@@ -102,6 +129,8 @@ db_put :: proc(db: ^DB, key, value: []byte) {
 }
 
 db_get :: proc(db: ^DB, key: []byte) -> ([]byte, bool) {
+	//this is the part where the bloom filter works best.
+	// Check if the bloom filter does not contain the key 
 
 	// First we would like to check if the key is in the memtable
 	val_memtable, memtable_found := memtable_get(db.memtable, key)
@@ -115,7 +144,12 @@ db_get :: proc(db: ^DB, key: []byte) -> ([]byte, bool) {
 
 	for sstable in db.sst_files {
 
-		val_sstable, sstable_found := sstable_find(sstable, key)
+		// Use bloom filter to eliminate searching files we know don't contain the key
+		if !contains(sstable.filter, key) {
+			continue
+		}
+
+		val_sstable, sstable_found := sstable_find(sstable.filename, key)
 		if sstable_found {
 			return val_sstable, sstable_found
 		}
@@ -154,8 +188,11 @@ sstable_flush :: proc(db: ^DB) {
 
 	timestamp := time.to_unix_nanoseconds(time.now())
 	filename := fmt.tprintf("%s/%d.sst", db.data_directory, timestamp)
+	filtername := fmt.tprintf("%s/%d.filter", db.data_directory, timestamp)
 
-	// Try adding O_TRUNC and changing permissions to 0o666 (Read/Write for Everyone)
+	filter := bloomfilter_init(db.memtable.count, 0.01)
+
+
 	file, open_err := os.open(filename, os.O_WRONLY | os.O_CREATE | os.O_TRUNC, 0o664)
 
 	if open_err != os.ERROR_NONE {
@@ -181,16 +218,30 @@ sstable_flush :: proc(db: ^DB) {
 		return
 	}
 
-	append(&db.sst_files, filename)
+	append(&db.sst_files, SSTableHandle{filename = filename, filter = filter})
 
 	// sort
-	slice.sort(db.sst_files[:])
+	slice.sort_by(db.sst_files[:], proc(a, b: SSTableHandle) -> bool {
+		return a.filename < b.filename
+	})
 	slice.reverse(db.sst_files[:])
+
+	// Write all the keys in the memtable into the filter first
+	current_node := db.memtable.head.next[0]
+	for current_node != nil {
+		add(filter, current_node.key)
+		current_node = current_node.next[0]
+	}
+
 
 	// 3. WRITE THE DATA (The heavy lifting)
 	// We will implement this detailed binary encoding in a moment.
 	keys_count := sstable_write_file(file, db.memtable)
 	fmt.printf("Flushed SSTable: %s\n", filename)
+
+	// save the filter to file as well
+
+	save_filter_to_file(filter, filtername)
 
 	// 4. CLEANUP (The Reset)
 	// A. Wipe the MemTable (Instant clear via Arena)

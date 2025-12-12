@@ -107,7 +107,17 @@ sstable_iterator_close :: proc(it: ^SSTableIterator) {
 	free(it)
 }
 
+
+compaction_worker :: proc(db: ^DB) {
+
+}
+
 db_compact :: proc(db: ^DB) {
+
+	// variable for the total size of all the .sst files
+	total_size_file: i64
+
+
 	fmt.println("==== STARTED COMPACTION ====")
 
 	// Make iterators for all the files in the db
@@ -117,9 +127,9 @@ db_compact :: proc(db: ^DB) {
 	// loop through sstable_files and make iterators for each
 	// since sstable_files is sorted, iterators[0] will always be the most recent file
 
-	for filename in db.sst_files {
-		fmt.printf("Attempting to open iterator for: %s\n", filename) // <--- DEBUG 1
-		it := sstable_iterator_init(filename)
+	for ssthandle in db.sst_files {
+		fmt.printf("Attempting to open iterator for: %s\n", ssthandle.filename) // <--- DEBUG 1
+		it := sstable_iterator_init(ssthandle.filename)
 		if it.valid {
 			fmt.println(" -> Success: Iterator Valid.") // <--- DEBUG 2
 			append(&iterators, it)
@@ -134,6 +144,14 @@ db_compact :: proc(db: ^DB) {
 		fmt.println("EXITING: No valid iterators found.")
 		return
 	}
+
+	// Loop through the iterators to get the total_size_file
+	for it in iterators {
+		total_size_file += it.file_size
+	}
+
+	// initialize new bloom filter
+	filter := bloomfilter_init(int(total_size_file / 8), 0.01)
 
 	// We are going to make a file which is what we will write to, we will also open this in the data folder
 	temp_filename := fmt.tprintf("%s/compacted.tmp", db.data_directory)
@@ -166,6 +184,8 @@ db_compact :: proc(db: ^DB) {
 		found_winner := false
 
 		for it in iterators { 	//loop through all the iterators 
+
+			//update the total_size_file variable by adding the file_size of the iterators/files
 			if it.valid && compare_keys(it.key, min_key) == 0 { 	// if they are valid and have the smallest key
 
 				if !found_winner { 	// Check if we have found the winner, if not, feed it to the builder.
@@ -176,6 +196,7 @@ db_compact :: proc(db: ^DB) {
 					)
 					builder_add(builder, it.key, it.value) // iterators is sorted, so the first it which is a winner is the most recent
 					found_winner = true
+					add(filter, it.key)
 
 
 				} else {
@@ -199,22 +220,25 @@ db_compact :: proc(db: ^DB) {
 		sstable_iterator_close(it)
 	}
 
-	for filename in db.sst_files {
-		os.remove(filename)
+	for ssthandle in db.sst_files {
+		os.remove(ssthandle.filename)
 	}
 
 	//Rename the Temp File
 	// We give it a new timestamp name so it looks like a normal SSTable
 	new_timestamp := time.to_unix_nanoseconds(time.now())
 	new_filename := fmt.tprintf("%s/%d.sst", db.data_directory, new_timestamp)
+	filter_filename := fmt.tprintf("%s/%d.filter", db.data_directory, new_timestamp)
+
 
 	os.rename(temp_filename, new_filename)
+	save_filter_to_file(filter, filter_filename)
 
 	// Clear the old files from out db
 	clear(&db.sst_files)
 
 	// Append the new file
-	append(&db.sst_files, new_filename)
+	append(&db.sst_files, SSTableHandle{filename = new_filename, filter = filter})
 
 	// Success Message
 	fmt.printf("Compaction Complete. Merged into: %s\n", new_filename)
