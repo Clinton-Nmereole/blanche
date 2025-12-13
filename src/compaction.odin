@@ -3,6 +3,9 @@ package blanche
 import "core:encoding/endian"
 import "core:fmt"
 import "core:os"
+import "core:slice"
+import "core:strings"
+import "core:sync"
 import "core:time"
 
 // Well basically what the compaction phase does is merge old sst files into a new "master" sst file
@@ -109,10 +112,34 @@ sstable_iterator_close :: proc(it: ^SSTableIterator) {
 
 
 compaction_worker :: proc(db: ^DB) {
+	// Always runs in the background
+	for {
+		time.sleep(1 * time.Second)
+
+		// Check the if len(db.sstable_files) > 5
+		sync.mutex_lock(&db.mutex)
+		if len(db.sst_files) > 5 {
+			snapshot_files := slice.clone_to_dynamic(db.sst_files[:])
+			count := len(snapshot_files)
+			sync.mutex_unlock(&db.mutex)
+			fmt.println("Compacting...")
+			compacted_handle := db_compact(snapshot_files, db.data_directory)
+			sync.mutex_lock(&db.mutex)
+			db.sst_files = slice.clone_to_dynamic(db.sst_files[0:len(db.sst_files) - count])
+			append(&db.sst_files, compacted_handle)
+
+		}
+		sync.mutex_unlock(&db.mutex)
+
+	}
 
 }
 
-db_compact :: proc(db: ^DB) {
+db_compact :: proc(files: [dynamic]SSTableHandle, data_dir: string) -> SSTableHandle {
+
+	//type of result to return 
+	result: SSTableHandle
+
 
 	// variable for the total size of all the .sst files
 	total_size_file: i64
@@ -127,7 +154,7 @@ db_compact :: proc(db: ^DB) {
 	// loop through sstable_files and make iterators for each
 	// since sstable_files is sorted, iterators[0] will always be the most recent file
 
-	for ssthandle in db.sst_files {
+	for ssthandle in files {
 		fmt.printf("Attempting to open iterator for: %s\n", ssthandle.filename) // <--- DEBUG 1
 		it := sstable_iterator_init(ssthandle.filename)
 		if it.valid {
@@ -142,7 +169,7 @@ db_compact :: proc(db: ^DB) {
 
 	if len(iterators) == 0 {
 		fmt.println("EXITING: No valid iterators found.")
-		return
+		return result
 	}
 
 	// Loop through the iterators to get the total_size_file
@@ -154,9 +181,9 @@ db_compact :: proc(db: ^DB) {
 	filter := bloomfilter_init(int(total_size_file / 8), 0.01)
 
 	// We are going to make a file which is what we will write to, we will also open this in the data folder
-	temp_filename := fmt.tprintf("%s/compacted.tmp", db.data_directory)
+	temp_filename := fmt.tprintf("%s/compacted.tmp", data_dir)
 	builder := builder_init(temp_filename)
-	if builder == nil {return} 	// Failed to create file
+	if builder == nil {return result} 	// Failed to create file
 
 	// Merge Logic 
 
@@ -220,28 +247,37 @@ db_compact :: proc(db: ^DB) {
 		sstable_iterator_close(it)
 	}
 
-	for ssthandle in db.sst_files {
+	for ssthandle in files {
+		old_filter_name := fmt.tprintf(
+			"%s.filter",
+			strings.trim_suffix(ssthandle.filename, ".sst"),
+		)
 		os.remove(ssthandle.filename)
+		os.remove(old_filter_name)
 	}
 
 	//Rename the Temp File
 	// We give it a new timestamp name so it looks like a normal SSTable
 	new_timestamp := time.to_unix_nanoseconds(time.now())
-	new_filename := fmt.tprintf("%s/%d.sst", db.data_directory, new_timestamp)
-	filter_filename := fmt.tprintf("%s/%d.filter", db.data_directory, new_timestamp)
+	new_filename := fmt.tprintf("%s/%d.sst", data_dir, new_timestamp)
+	filter_filename := fmt.tprintf("%s/%d.filter", data_dir, new_timestamp)
 
 
 	os.rename(temp_filename, new_filename)
 	save_filter_to_file(filter, filter_filename)
+	result.filter = filter
+	result.filename = new_filename
 
 	// Clear the old files from out db
-	clear(&db.sst_files)
+	//clear(&db.sst_files)
 
 	// Append the new file
-	append(&db.sst_files, SSTableHandle{filename = new_filename, filter = filter})
+	//append(&db.sst_files, SSTableHandle{filename = new_filename, filter = filter})
 
 	// Success Message
 	fmt.printf("Compaction Complete. Merged into: %s\n", new_filename)
+
+	return result
 
 
 }
