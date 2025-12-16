@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:os"
 
 SPARSE_FACTOR :: 100
+TOMBSTONE :: max(u64)
 
 SSTableBuilder :: struct {
 	file:           os.Handle, // the output file
@@ -46,20 +47,20 @@ builder_add :: proc(b: ^SSTableBuilder, key, value: []byte) {
 	// Write Data block
 
 	//first we write the key length
-	klen_byte: [4]byte
-	endian.put_u32(klen_byte[:], endian.Byte_Order.Little, u32(len(key)))
+	klen_byte: [8]byte
+	endian.put_u64(klen_byte[:], endian.Byte_Order.Little, u64(len(key)))
 	os.write(b.file, klen_byte[:])
-	b.current_offset += 4
+	b.current_offset += 8
 
 	// write the actual key
 	os.write(b.file, key)
 	b.current_offset += u64(len(key))
 
 	// write the value length
-	vlen_byte: [4]byte
-	endian.put_u32(vlen_byte[:], endian.Byte_Order.Little, u32(len(value)))
+	vlen_byte: [8]byte
+	endian.put_u64(vlen_byte[:], endian.Byte_Order.Little, u64(len(value)))
 	os.write(b.file, vlen_byte[:])
-	b.current_offset += 4
+	b.current_offset += 8
 
 	// write the actual value
 	os.write(b.file, value)

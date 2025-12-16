@@ -14,13 +14,15 @@ import "core:time"
 SSTableHandle :: struct {
 	filename: string,
 	filter:   ^BLOOMFILTER,
+	meta:     FileMetaData,
 }
 
 DB :: struct {
 	memtable:       ^Memtable,
 	wal:            ^WAL,
 	data_directory: string,
-	sst_files:      [dynamic]SSTableHandle,
+	manifest:       ^Manifest,
+	levels:         [dynamic][dynamic]SSTableHandle,
 	mutex:          sync.Mutex,
 }
 
@@ -37,64 +39,70 @@ db_open :: proc(dir: string) -> ^DB {
 	db := new(DB)
 	db.data_directory = dir
 
-	// Load the list of names of the .sst files into db.sstables 
-	// So open a os.Handle with Read only into the directory
-	// Loop through every file in the directory
-	// If the file has a .sst extension, get its name and save it to the dynamic array
-	d, err := os.open(dir, os.O_RDONLY)
-	if err == os.ERROR_NONE {
-		defer os.close(d)
-
-		infos, _ := os.read_dir(d, -1)
-
-		for info in infos {
-			// Check if the file ends in .sst
-			if !info.is_dir && strings.has_suffix(info.name, ".sst") {
-				// Construct full path "data/123.sst"
-				full_path := fmt.tprintf("%s/%s", dir, info.name)
-
-				// Construct the filter path
-				filter_path := strings.trim_suffix(full_path, ".sst")
-				filter_path = fmt.tprintf("%s.filter", filter_path)
-				file_filter: ^BLOOMFILTER
-
-				// Load the filter from file
-				if os.is_file(filter_path) {
-
-					file_filter = load_filter_from_file(filter_path)
-
-				}
-
-				append(&db.sst_files, SSTableHandle{filename = full_path, filter = file_filter})
-			}
-		}
-		// SORT THEM! 
-		// We want Newest files first. 
-		// Since our names are timestamps (100.sst, 200.sst), 
-		// we can sort strings in Descending order (Big numbers first).
-
-		slice.sort_by(db.sst_files[:], proc(a, b: SSTableHandle) -> bool {
-			return a.filename < b.filename
-		})
-		slice.reverse(db.sst_files[:])
+	// 1. Initialize the Levels
+	// We create a slot for every possible level
+	for i := 0; i < constants.MAX_LEVEL; i += 1 {
+		lvl := make([dynamic]SSTableHandle)
+		append(&db.levels, lvl)
 	}
 
+	// 2. Load the Manifest
+	manifest_path := fmt.tprintf("%s/manifest", dir)
+	if os.exists(manifest_path) {
+		// Load existing database state
+		fmt.println("Loading existing Manifest...")
+		db.manifest = manifest_load(manifest_path)
 
-	// initialize memtable
+		// Reconstruct the levels in RAM
+		for file_meta in db.manifest.files {
+			// Construct the path to the filter
+			// e.g., data/123.sst -> data/123.filter
+			filter_path := strings.trim_suffix(file_meta.filename, ".sst")
+			filter_path = fmt.tprintf("%s.filter", filter_path)
+
+			file_filter: ^BLOOMFILTER
+			if os.exists(filter_path) {
+				file_filter = load_filter_from_file(filter_path)
+			}
+
+			// Create the Handle
+			handle := SSTableHandle {
+				filename = file_meta.filename,
+				filter   = file_filter,
+				meta     = file_meta,
+			}
+
+			// Place it in the correct level!
+			append(&db.levels[file_meta.level], handle)
+			slice.sort_by(
+				db.levels[0][:],
+				proc(a, b: SSTableHandle) -> bool {
+					return a.filename > b.filename // Descending (Big number = Newer)
+				},
+			)
+		}
+
+	} else {
+		// New Database: Create fresh manifest
+		fmt.println("Creating new Manifest...")
+		db.manifest = new(Manifest)
+		db.manifest.filename = manifest_path
+		// db.manifest.files is already a zero-value dynamic array (empty)
+	}
+
+	// 3. Initialize Memtable
 	db.memtable = memtable_init()
 
-	//initialize WAL
-	// Note: In Odin, string concatenation requires allocation. 
-	// For simplicity here, we assume "data/wal.log" is fine.
+	// 4. Initialize WAL
 	wal_path := fmt.tprintf("%s/wal.log", dir)
 	db.wal, _ = wal_init(wal_path)
 
-	// RECOVERY (The Critical Step)
-	// Read the WAL and fill the MemTable back up
-	wal_recover(db.wal, db.memtable) //TODO: this does not give an error if recovery fails. Might want to handle that
+	// 5. Recovery
+	wal_recover(db.wal, db.memtable)
 
 	return db
 }
+
 
 db_close :: proc(db: ^DB) {
 	// Force write to disk
@@ -142,18 +150,51 @@ db_get :: proc(db: ^DB, key: []byte) -> ([]byte, bool) {
 	// Loop through all the sorted sst_files in the db since they are sorted in reverse order,
 	// we are looking at the newest entries first
 
-	for sstable in db.sst_files {
+	for sstable in db.levels[0] {
 
 		// Use bloom filter to eliminate searching files we know don't contain the key
 		if !contains(sstable.filter, key) {
 			continue
 		}
 
-		val_sstable, sstable_found := sstable_find(sstable.filename, key)
-		if sstable_found {
-			return val_sstable, sstable_found
+		val, found, is_tombstone := sstable_find(sstable.filename, key)
+		if found {
+			if is_tombstone {
+				return nil, false
+			} else {
+				return val, true
+			}
 		}
 
+	}
+	// Check Level 1 and up
+	for i := 1; i < len(db.levels); i += 1 {
+		for sstable in db.levels[i] {
+			// OPTIMIZATION OPPORTUNITY! ⚡
+			// We have sstable.meta.firstkey and sstable.meta.lastkey
+			// if the key is not in the range firstkey = lastkey... skip that file and move to the next
+			if !(compare_keys(key, sstable.meta.firstkey) >= 0 &&
+				   compare_keys(key, sstable.meta.lastkey) <= 0) {
+				continue
+
+			} else { 	// the key is in the range
+				// we check the bloom filter
+				if !contains(sstable.filter, key) {
+					continue
+				}
+
+				// if bloom filter says maybe, then we search the file while being aware of tombstones
+				val, found, is_tombstone := sstable_find(sstable.filename, key)
+				if found {
+					if is_tombstone {
+						return nil, false
+					} else {
+						return val, true
+					}
+				}
+
+			}
+		}
 	}
 
 
@@ -161,6 +202,8 @@ db_get :: proc(db: ^DB, key: []byte) -> ([]byte, bool) {
 
 
 }
+
+// TODO: Create db_delete
 
 sstable_flush :: proc(db: ^DB) {
 	// --- DIAGNOSTIC START ---
@@ -218,15 +261,35 @@ sstable_flush :: proc(db: ^DB) {
 		return
 	}
 
-	append(&db.sst_files, SSTableHandle{filename = filename, filter = filter})
+	// get the firstkey
+	firstkey := slice.clone(db.memtable.head.next[0].key)
+	lastkey_node := db.memtable.head.next[0]
+	for lastkey_node.next[0] != nil {
+		lastkey_node = lastkey_node.next[0]
+	}
+	lastkey := slice.clone(lastkey_node.key)
+
+	append(
+		&db.levels[0],
+		SSTableHandle {
+			filename = filename,
+			filter = filter,
+			meta = FileMetaData {
+				level = 0,
+				filename = filename,
+				firstkey = firstkey,
+				lastkey = lastkey,
+			},
+		},
+	)
 
 	// sort
-	slice.sort_by(db.sst_files[:], proc(a, b: SSTableHandle) -> bool {
-		return a.filename < b.filename
+	slice.sort_by(db.levels[0][:], proc(a, b: SSTableHandle) -> bool {
+		return a.filename > b.filename
 	})
-	slice.reverse(db.sst_files[:])
 
 	// Write all the keys in the memtable into the filter first
+	// We can use this loop to also get the lastkey
 	current_node := db.memtable.head.next[0]
 	for current_node != nil {
 		add(filter, current_node.key)
@@ -315,10 +378,10 @@ sstable_write_file :: proc(file: os.Handle, mt: ^Memtable) -> int {
 
 		// Ok, now we actually write to sst file in the format [key length] [key] [value length] [value]
 		// Write key length
-		key_length_bytes: [4]byte
-		endian.put_u32(key_length_bytes[:], endian.Byte_Order.Little, u32(len(current_node.key)))
+		key_length_bytes: [8]byte
+		endian.put_u64(key_length_bytes[:], endian.Byte_Order.Little, u64(len(current_node.key)))
 		os.write(file, key_length_bytes[:])
-		current_offset += 4
+		current_offset += 8
 
 		// Write actual key
 		os.write(file, current_node.key)
@@ -326,14 +389,14 @@ sstable_write_file :: proc(file: os.Handle, mt: ^Memtable) -> int {
 
 
 		// Write value length
-		value_length_bytes: [4]byte
-		endian.put_u32(
+		value_length_bytes: [8]byte
+		endian.put_u64(
 			value_length_bytes[:],
 			endian.Byte_Order.Little,
-			u32(len(current_node.value)),
+			u64(len(current_node.value)),
 		)
 		os.write(file, value_length_bytes[:])
-		current_offset += 4
+		current_offset += 8
 
 		// Write actual value
 		os.write(file, current_node.value)
@@ -357,8 +420,8 @@ sstable_write_file :: proc(file: os.Handle, mt: ^Memtable) -> int {
 	for entry in index_list {
 
 		// write key length
-		key_len: [4]byte
-		endian.put_u32(key_len[:], endian.Byte_Order.Little, u32(len(entry.key)))
+		key_len: [8]byte
+		endian.put_u64(key_len[:], endian.Byte_Order.Little, u64(len(entry.key)))
 		os.write(file, key_len[:])
 
 		// write key
@@ -367,7 +430,7 @@ sstable_write_file :: proc(file: os.Handle, mt: ^Memtable) -> int {
 		// write offset
 		// since it is an integer (u64 specifically), we need to convert it to bytes
 		offset_bytes: [8]byte
-		endian.put_u32(offset_bytes[:], endian.Byte_Order.Little, u32(entry.offset))
+		endian.put_u64(offset_bytes[:], endian.Byte_Order.Little, u64(entry.offset))
 		os.write(file, offset_bytes[:])
 		delete(entry.key) //remember that we are making deep copies of key when we initially put it in index_list, this frees that memory.
 
@@ -388,11 +451,18 @@ sstable_write_file :: proc(file: os.Handle, mt: ^Memtable) -> int {
 
 // We need a function that takes a filename and a key, and returns the value (or not found)
 
-sstable_find :: proc(filename: string, key: []byte) -> ([]byte, bool) {
+sstable_find :: proc(
+	filename: string,
+	key: []byte,
+) -> (
+	value: []byte,
+	is_found: bool,
+	is_tombstone: bool,
+) {
 
 	// First we open the file
 	file, err := os.open(filename, os.O_RDONLY)
-	if err != os.ERROR_NONE {return nil, false}
+	if err != os.ERROR_NONE {return nil, false, false}
 	defer os.close(file)
 
 	// Check if the file is corrupted
@@ -400,7 +470,7 @@ sstable_find :: proc(filename: string, key: []byte) -> ([]byte, bool) {
 
 	if file_size < 8 {
 		fmt.printf("The file %s is corrupted and could not be read", filename)
-		return nil, false
+		return nil, false, false
 	}
 
 
@@ -429,10 +499,10 @@ sstable_find :: proc(filename: string, key: []byte) -> ([]byte, bool) {
 	// Looping through index block up until the footer
 	for current_position < (file_size - 8) {
 		// Read the key length 
-		klen_buf: [4]byte
+		klen_buf: [8]byte
 		os.read(file, klen_buf[:])
-		klen, _ := endian.get_u32(klen_buf[:], endian.Byte_Order.Little)
-		current_position += 4
+		klen, _ := endian.get_u64(klen_buf[:], endian.Byte_Order.Little)
+		current_position += 8
 
 		// Read the key data
 		key_buf := make([]byte, klen)
@@ -442,7 +512,7 @@ sstable_find :: proc(filename: string, key: []byte) -> ([]byte, bool) {
 		// Read Offset
 		offset_buf: [8]byte
 		os.read(file, offset_buf[:])
-		offset, _ := endian.get_u32(offset_buf[:], endian.Byte_Order.Little)
+		offset, _ := endian.get_u64(offset_buf[:], endian.Byte_Order.Little)
 		current_position += 8
 
 		// Compare to find key
@@ -480,11 +550,11 @@ sstable_find :: proc(filename: string, key: []byte) -> ([]byte, bool) {
 
 	for curr < i64(index_offset) {
 		// read the key length
-		klen_byte: [4]byte
+		klen_byte: [8]byte
 		_, err := os.read(file, klen_byte[:])
 		if err != nil {break}
-		klen, _ := endian.get_u32(klen_byte[:], endian.Byte_Order.Little)
-		curr += 4
+		klen, _ := endian.get_u64(klen_byte[:], endian.Byte_Order.Little)
+		curr += 8
 
 		// read the actual key
 		found_key := make([]byte, klen)
@@ -492,15 +562,32 @@ sstable_find :: proc(filename: string, key: []byte) -> ([]byte, bool) {
 		curr += i64(klen)
 
 		// read the value length
-		vlen_byte: [4]byte
+		vlen_byte: [8]byte
 		os.read(file, vlen_byte[:])
-		vlen, _ := endian.get_u32(vlen_byte[:], endian.Byte_Order.Little)
-		curr += 4
+		vlen, _ := endian.get_u64(vlen_byte[:], endian.Byte_Order.Little)
+		curr += 8
 
 		// read the actual value 
-		found_value := make([]byte, vlen)
-		os.read(file, found_value[:])
-		curr += i64(vlen)
+		found_value: []byte
+		if vlen == TOMBSTONE {
+			if compare_keys(found_key, key) == 0 {
+				found_value = nil
+				os.seek(file, i64(vlen), os.SEEK_CUR)
+				curr += i64(vlen)
+				return found_value, true, true
+			} else {
+				//os.seek(file, i64(vlen), os.SEEK_CUR) //No need to seek, since this is a tombstone value, the value will be blank
+				curr += i64(vlen)
+
+
+			}
+
+
+		} else {
+			found_value := make([]byte, vlen)
+			os.read(file, found_value[:])
+			curr += i64(vlen)
+		}
 
 		// Check if the found key is equal to the key being searched
 		cmp := compare_keys(found_key, key)
@@ -508,13 +595,13 @@ sstable_find :: proc(filename: string, key: []byte) -> ([]byte, bool) {
 		delete(found_key)
 		if cmp == 0 {
 			// We found the key
-			return found_value, true
+			return found_value, true, false
 		}
 		if cmp > 0 {
 			// We found a key greater than the key being searched, since the database is sorted we can end search
 			// because that means the key is not in the database
 			delete(found_value) // since the key is not in the database clean up found_value allocated with make
-			return nil, false
+			return nil, false, false
 		}
 
 		delete(found_value) // clean up in the case that we are still searching (we haven't found the key yet)
@@ -523,6 +610,6 @@ sstable_find :: proc(filename: string, key: []byte) -> ([]byte, bool) {
 	}
 
 
-	return nil, false
+	return nil, false, false
 
 }

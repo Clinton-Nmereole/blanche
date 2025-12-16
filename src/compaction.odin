@@ -21,6 +21,7 @@ SSTableIterator :: struct {
 	valid:         bool,
 	key:           []byte,
 	value:         []byte,
+	is_tombstone:  bool,
 }
 
 sstable_iterator_init :: proc(filename: string) -> ^SSTableIterator {
@@ -77,10 +78,10 @@ sstable_iterator_next :: proc(it: ^SSTableIterator) {
 	}
 
 	// Read the key length
-	klen_buf: [4]byte
+	klen_buf: [8]byte
 	os.read(it.file, klen_buf[:])
-	klen, _ := endian.get_u32(klen_buf[:], endian.Byte_Order.Little)
-	it.curr_position += 4
+	klen, _ := endian.get_u64(klen_buf[:], endian.Byte_Order.Little)
+	it.curr_position += 8
 
 	// Read the key
 	it.key = make([]byte, klen)
@@ -88,15 +89,25 @@ sstable_iterator_next :: proc(it: ^SSTableIterator) {
 	it.curr_position += i64(klen)
 
 	// Read the value length
-	vlen_buf: [4]byte
+	vlen_buf: [8]byte
 	os.read(it.file, vlen_buf[:])
-	vlen, _ := endian.get_u32(vlen_buf[:], endian.Byte_Order.Little)
-	it.curr_position += 4
+	vlen, _ := endian.get_u64(vlen_buf[:], endian.Byte_Order.Little)
+	it.curr_position += 8
 
 	// Read the value
-	it.value = make([]byte, vlen)
-	os.read(it.file, it.value)
-	it.curr_position += i64(vlen)
+	if u64(vlen) == TOMBSTONE {
+		it.value = nil
+		it.is_tombstone = true
+		os.seek(it.file, i64(vlen), os.SEEK_CUR)
+		it.curr_position += i64(vlen)
+
+	} else {
+		it.value = make([]byte, vlen)
+		it.is_tombstone = false
+		os.read(it.file, it.value)
+		it.curr_position += i64(vlen)
+
+	}
 
 	it.valid = true
 
@@ -110,6 +121,24 @@ sstable_iterator_close :: proc(it: ^SSTableIterator) {
 	free(it)
 }
 
+get_overlapping_inputs :: proc(
+	target_file: SSTableHandle,
+	candidates: [dynamic]SSTableHandle,
+) -> [dynamic]SSTableHandle {
+	overlaps := make([dynamic]SSTableHandle)
+
+	// Look through candidates (level 1 files) and check if there are overlaps
+	for candidate in candidates {
+		if compare_keys(target_file.meta.firstkey, candidate.meta.lastkey) <= 0 &&
+		   compare_keys(target_file.meta.lastkey, candidate.meta.firstkey) >= 0 {
+			append(&overlaps, candidate)
+		}
+
+	}
+
+	return overlaps
+}
+
 
 compaction_worker :: proc(db: ^DB) {
 	// Always runs in the background
@@ -118,15 +147,15 @@ compaction_worker :: proc(db: ^DB) {
 
 		// Check the if len(db.sstable_files) > 5
 		sync.mutex_lock(&db.mutex)
-		if len(db.sst_files) > 5 {
-			snapshot_files := slice.clone_to_dynamic(db.sst_files[:])
+		if len(db.levels[0]) > 5 {
+			snapshot_files := slice.clone_to_dynamic(db.levels[0][:])
 			count := len(snapshot_files)
 			sync.mutex_unlock(&db.mutex)
 			fmt.println("Compacting...")
 			compacted_handle := db_compact(snapshot_files, db.data_directory)
 			sync.mutex_lock(&db.mutex)
-			db.sst_files = slice.clone_to_dynamic(db.sst_files[0:len(db.sst_files) - count])
-			append(&db.sst_files, compacted_handle)
+			db.levels[0] = slice.clone_to_dynamic(db.levels[0][0:len(db.levels[0]) - count])
+			append(&db.levels[0], compacted_handle)
 
 		}
 		sync.mutex_unlock(&db.mutex)
@@ -221,6 +250,11 @@ db_compact :: proc(files: [dynamic]SSTableHandle, data_dir: string) -> SSTableHa
 						" -> Winner Found! Value: '%s' (Writing to builder)\n",
 						string(it.value),
 					)
+					if it.is_tombstone {
+						sstable_iterator_next(it)
+						found_winner = true
+						continue
+					}
 					builder_add(builder, it.key, it.value) // iterators is sorted, so the first it which is a winner is the most recent
 					found_winner = true
 					add(filter, it.key)
