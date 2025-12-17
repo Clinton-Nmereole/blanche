@@ -26,6 +26,148 @@ DB :: struct {
 	mutex:          sync.Mutex,
 }
 
+DBIterator :: struct {
+	mem_iter:  ^MemtableIterator,
+	sst_iters: [dynamic]^SSTableIterator,
+	// The "Public" fields for the user
+	valid:     bool,
+	key:       []byte,
+	value:     []byte,
+}
+
+db_iterator_init :: proc(db: ^DB, start_key, end_key: []byte) -> ^DBIterator {
+
+	// create new db iterator struct
+	db_iter := new(DBIterator)
+
+	// initialize memtable iterator and set it to DBIterator's mem_iter field
+	db_iter.mem_iter = memtable_iterator_init(db.memtable)
+
+	// initialize an SSTableIterator for every single file in the db (loop through levels) 
+	//or maybe we can only loop through files in a range if the range is passed.
+
+	// So go through each level
+	for level in db.levels {
+
+		// for each file in the level we check if it is the correct range. We are not going to bother making
+		// iterators for files that are not the correct range requested by the user.
+		for file in level {
+			if compare_keys(start_key, file.meta.firstkey) <= 0 &&
+			   compare_keys(file.meta.lastkey, end_key) >= 0 {
+				sstable_iter := sstable_iterator_init(file.filename)
+				append(&db_iter.sst_iters, sstable_iter)
+			} else {
+				continue
+			}
+		}
+
+	}
+
+	return db_iter
+}
+
+db_iterator_next :: proc(db_iter: ^DBIterator) {
+
+	for {
+		// So we are going to first free old memory from the previous call
+		if db_iter.key != nil {delete(db_iter.key)}
+		if db_iter.value != nil {delete(db_iter.value)}
+
+		// next we are going to find the minimum key. To do this we will look at all iterators to find the min_key
+		// since the memtable is sorted, we know that the minimum key from a memtable is the first key
+
+		// Find min_key
+		min_key: []byte
+		//We can start by setting the min_key equal to the current value in the memtable (smallest key in memtable)
+		// Then we can check if it is still the smallest key among the keys in files
+		if db_iter.mem_iter.node != nil {
+			min_key = db_iter.mem_iter.node.key
+		} else {min_key = nil}
+		for sstable_it in db_iter.sst_iters {
+			if sstable_it.valid {
+				if min_key == nil || compare_keys(min_key, sstable_it.key) > 0 {
+					min_key = sstable_it.key
+				}
+			}
+		}
+
+		// if the min_key is nil after the previous step that means the current memtable key is nil. (We reached the end of the memtable)
+		// it also means that we reached the end of all our sst files.
+		if min_key == nil {
+			db_iter.valid = false
+			fmt.println("We have reached the end or have run out of valid iterators")
+			return
+		}
+
+		// Pick winner
+		found_winner: bool = false
+
+		// If the min_key is the same as the key in the memtable then we set the value to that since it is the most recent.
+		if db_iter.mem_iter.node != nil && compare_keys(min_key, db_iter.mem_iter.node.key) == 0 {
+			found_winner = true
+			if db_iter.mem_iter.node.value != nil {
+				db_iter.key = slice.clone(db_iter.mem_iter.node.key)
+				db_iter.value = slice.clone(db_iter.mem_iter.node.value)
+
+
+			}
+			// move iterator forward
+			db_iter.mem_iter.node = db_iter.mem_iter.node.next[0] // looks long but basically go to the mem_iter, get the node, set it to the next key in level 0
+		}
+		// then we loop through files and search (even if the min_key was in memtable) we need to move all iterators with that key forward
+		for it in db_iter.sst_iters {
+			if it.valid && compare_keys(it.key, min_key) == 0 { 	// if the iterator is valid and is the same as the min_key
+				if !found_winner {
+					// first we handle the tombstone condition.
+					if it.is_tombstone {
+						// if the key is found but has been deleted we do not want to return it to the user we do nothing and push 
+						// the iterator forward. WE DO NOT SET VALUE.
+						found_winner = true
+						sstable_iterator_next(it)
+						continue
+					} else { 	// we found the winner and it is not a tombstone
+						found_winner = true // we set found winner to true
+						db_iter.key = slice.clone(it.key)
+						db_iter.value = slice.clone(it.value)
+
+
+					}
+					//we move that iterator forward
+					sstable_iterator_next(it)
+
+					//return
+
+				} else {
+					// we already have winner from memtable or previous sstable file, we still need to push all
+					// sstable iterators with the same key forward
+					sstable_iterator_next(it)
+				}
+
+
+			}
+		}
+
+		if db_iter.key != nil {
+			return
+		}
+
+	}
+
+
+}
+
+db_iterator_close :: proc(db_iter: ^DBIterator) {
+	if db_iter.key != nil {delete(db_iter.key)}
+	if db_iter.value != nil {delete(db_iter.value)}
+	for iter in db_iter.sst_iters {
+		sstable_iterator_close(iter)
+	}
+	delete(db_iter.sst_iters)
+	free(db_iter.mem_iter)
+	free(db_iter)
+
+}
+
 // CONSTANT: When do we freeze and flush? (4MB)
 MEMTABLE_THRESHOLD :: 4 * constants.MB
 
@@ -220,77 +362,11 @@ db_delete :: proc(db: ^DB, key: []byte) {
 		sstable_flush(db)
 	}
 }
-// First, define a simple result struct (add to db.odin)
-KVPair :: struct {
-	key:   []byte,
-	value: []byte,
-}
 
-db_scan :: proc(db: ^DB, start_key, end_key: []byte) -> [dynamic]KVPair {
-	// Use a map for O(n) deduplication instead of O(n²)
-	seen := make(map[string][]byte)
-	defer delete(seen)
 
-	// 1. Scan MemTable first (newest data has priority)
-	node := db.memtable.head.next[0]
-	for node != nil {
-		if compare_keys(node.key, start_key) >= 0 && compare_keys(node.key, end_key) <= 0 {
-			// Skip tombstones
-			if node.value != nil {
-				key_str := string(node.key)
-				if key_str not_in seen {
-					val_copy := make([]byte, len(node.value))
-					copy(val_copy, node.value)
-					seen[key_str] = val_copy
-				}
-			}
-		}
-		node = node.next[0]
-	}
-
-	// 2. Scan SSTables (filter using manifest metadata)
-	for level in db.levels {
-		for sstable in level {
-			// Skip files outside range using manifest metadata!
-			if compare_keys(end_key, sstable.meta.firstkey) < 0 ||
-			   compare_keys(start_key, sstable.meta.lastkey) > 0 {
-				continue
-			}
-
-			// Scan this file with iterator
-			it := sstable_iterator_init(sstable.filename)
-			for it.valid {
-				if compare_keys(it.key, start_key) >= 0 && compare_keys(it.key, end_key) <= 0 {
-					// Skip tombstones and already-seen keys
-					if !it.is_tombstone {
-						key_str := string(it.key)
-						if key_str not_in seen {
-							val_copy := make([]byte, len(it.value))
-							copy(val_copy, it.value)
-							seen[key_str] = val_copy
-						}
-					}
-				}
-				sstable_iterator_next(it) // CRITICAL: advance iterator
-			}
-			sstable_iterator_close(it)
-		}
-	}
-
-	// 3. Convert map to result array
-	results := make([dynamic]KVPair)
-	for key_str, value in seen {
-		key_copy := make([]byte, len(key_str))
-		copy(key_copy, transmute([]byte)key_str)
-		append(&results, KVPair{key = key_copy, value = value})
-	}
-
-	// Sort results by key
-	slice.sort_by(results[:], proc(a, b: KVPair) -> bool {
-		return compare_keys(a.key, b.key) < 0
-	})
-
-	return results
+db_scan :: proc(db: ^DB, start_key, end_key: []byte) -> ^DBIterator {
+	db_iter := db_iterator_init(db, start_key, end_key)
+	return db_iter
 }
 
 

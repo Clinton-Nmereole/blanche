@@ -66,7 +66,7 @@ Published in: Acta Informatica
 ### ✅ Phase 7: Manifest (Database Metadata)
 - **Purpose:** Track all SSTable files and their metadata
 - **Contents:** Stores `firstkey`, `lastkey`, `filesize`, `level` for each file
-- **Persistence:** JSON format for human readability
+- **Persistence:** Saved as binary for easy computer processing and avoiding parsing (downside is it is not human readable)
 - **Loading:** Automatic database state restoration on restart
 - **Benefits:** Enables efficient range query planning and file management
 

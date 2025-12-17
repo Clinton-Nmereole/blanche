@@ -32,6 +32,17 @@ Memtable :: struct {
 	count:     int, // How many keys are in the memtable
 }
 
+// Wrapper around Node struct to act as a memtable iterator
+MemtableIterator :: struct {
+	node: ^Node,
+}
+
+memtable_iterator_init :: proc(mt: ^Memtable) -> ^MemtableIterator {
+	mem_iter := new(MemtableIterator)
+	mem_iter.node = mt.head.next[0]
+	return mem_iter
+}
+
 //Initialize Memtable
 
 memtable_init :: proc() -> ^Memtable {
