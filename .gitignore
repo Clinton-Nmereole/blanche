@@ -2,3 +2,4 @@ build/
 *.exe
 .DS_Store
 phase_6_bloom_filters.md
+OPTIMIZATIONS.md
