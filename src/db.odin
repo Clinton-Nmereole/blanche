@@ -138,7 +138,7 @@ db_put :: proc(db: ^DB, key, value: []byte) {
 
 db_get :: proc(db: ^DB, key: []byte) -> ([]byte, bool) {
 	//this is the part where the bloom filter works best.
-	// Check if the bloom filter does not contain the key 
+	// Check if the bloom filter does not contain the key
 
 	// First we would like to check if the key is in the memtable
 	val_memtable, memtable_found := memtable_get(db.memtable, key)
@@ -153,7 +153,8 @@ db_get :: proc(db: ^DB, key: []byte) -> ([]byte, bool) {
 	for sstable in db.levels[0] {
 
 		// Use bloom filter to eliminate searching files we know don't contain the key
-		if !contains(sstable.filter, key) {
+		// Skip bloom filter check if filter is nil (e.g., files from tests without filters)
+		if sstable.filter != nil && !contains(sstable.filter, key) {
 			continue
 		}
 
@@ -178,8 +179,8 @@ db_get :: proc(db: ^DB, key: []byte) -> ([]byte, bool) {
 				continue
 
 			} else { 	// the key is in the range
-				// we check the bloom filter
-				if !contains(sstable.filter, key) {
+				// we check the bloom filter (skip if nil)
+				if sstable.filter != nil && !contains(sstable.filter, key) {
 					continue
 				}
 
@@ -203,32 +204,97 @@ db_get :: proc(db: ^DB, key: []byte) -> ([]byte, bool) {
 
 }
 
-// TODO: Create db_delete
+// Delete a key by writing a tombstone
+db_delete :: proc(db: ^DB, key: []byte) {
+	// Use nil value to signal deletion (tombstone)
+	memtable_put(db.memtable, key, nil)
 
-sstable_flush :: proc(db: ^DB) {
-	// --- DIAGNOSTIC START ---
-	cwd := os.get_current_directory()
-	fmt.printf("\n[DIAGNOSTIC] Current Working Directory: %s\n", cwd)
+	// Write to WAL with empty value (will be read back as nil on recovery)
+	empty := []byte{}
+	if !wal_append(db.wal, key, empty) {
+		fmt.println("Failed to append delete to WAL.")
+	}
 
-	// Check if 'data' exists and what it is
-	info, err := os.stat(db.data_directory)
-	if err != os.ERROR_NONE {
-		fmt.printf(
-			"[DIAGNOSTIC] CRITICAL: Could not stat '%s'. Error: %v\n",
-			db.data_directory,
-			err,
-		)
-	} else {
-		fmt.printf("[DIAGNOSTIC] '%s' exists. Mode: %o (Octal)\n", db.data_directory, info.mode)
-		if !os.S_ISDIR(u32(info.mode)) {
-			fmt.printf(
-				"[DIAGNOSTIC] FATAL: '%s' is NOT a directory! It is a file.\n",
-				db.data_directory,
-			)
+	// Check if we need to flush
+	if db.memtable.size >= MEMTABLE_THRESHOLD {
+		sstable_flush(db)
+	}
+}
+// First, define a simple result struct (add to db.odin)
+KVPair :: struct {
+	key:   []byte,
+	value: []byte,
+}
+
+db_scan :: proc(db: ^DB, start_key, end_key: []byte) -> [dynamic]KVPair {
+	// Use a map for O(n) deduplication instead of O(n²)
+	seen := make(map[string][]byte)
+	defer delete(seen)
+
+	// 1. Scan MemTable first (newest data has priority)
+	node := db.memtable.head.next[0]
+	for node != nil {
+		if compare_keys(node.key, start_key) >= 0 && compare_keys(node.key, end_key) <= 0 {
+			// Skip tombstones
+			if node.value != nil {
+				key_str := string(node.key)
+				if key_str not_in seen {
+					val_copy := make([]byte, len(node.value))
+					copy(val_copy, node.value)
+					seen[key_str] = val_copy
+				}
+			}
+		}
+		node = node.next[0]
+	}
+
+	// 2. Scan SSTables (filter using manifest metadata)
+	for level in db.levels {
+		for sstable in level {
+			// Skip files outside range using manifest metadata!
+			if compare_keys(end_key, sstable.meta.firstkey) < 0 ||
+			   compare_keys(start_key, sstable.meta.lastkey) > 0 {
+				continue
+			}
+
+			// Scan this file with iterator
+			it := sstable_iterator_init(sstable.filename)
+			for it.valid {
+				if compare_keys(it.key, start_key) >= 0 && compare_keys(it.key, end_key) <= 0 {
+					// Skip tombstones and already-seen keys
+					if !it.is_tombstone {
+						key_str := string(it.key)
+						if key_str not_in seen {
+							val_copy := make([]byte, len(it.value))
+							copy(val_copy, it.value)
+							seen[key_str] = val_copy
+						}
+					}
+				}
+				sstable_iterator_next(it) // CRITICAL: advance iterator
+			}
+			sstable_iterator_close(it)
 		}
 	}
-	// --- DIAGNOSTIC END ---
 
+	// 3. Convert map to result array
+	results := make([dynamic]KVPair)
+	for key_str, value in seen {
+		key_copy := make([]byte, len(key_str))
+		copy(key_copy, transmute([]byte)key_str)
+		append(&results, KVPair{key = key_copy, value = value})
+	}
+
+	// Sort results by key
+	slice.sort_by(results[:], proc(a, b: KVPair) -> bool {
+		return compare_keys(a.key, b.key) < 0
+	})
+
+	return results
+}
+
+
+sstable_flush :: proc(db: ^DB) {
 	timestamp := time.to_unix_nanoseconds(time.now())
 	filename := fmt.tprintf("%s/%d.sst", db.data_directory, timestamp)
 	filtername := fmt.tprintf("%s/%d.filter", db.data_directory, timestamp)
@@ -245,21 +311,6 @@ sstable_flush :: proc(db: ^DB) {
 		return
 	}
 	defer os.close(file)
-
-	// 1. Create a unique filename based on current time
-	// format: data/12345678.sst
-	//timestamp := time.to_unix_nanoseconds(time.now())
-	//	filename := fmt.tprintf("%s/%d.sst", db.data_directory, timestamp)
-
-	// 2. Open the new file
-	//	file, err := os.open(filename, os.O_WRONLY | os.O_CREATE, 0o644)
-	if err != os.ERROR_NONE {
-		// --- ADD THIS DEBUG PRINT ---
-		fmt.printf("!!! ERROR CREATING FILE !!!\n")
-		fmt.printf("Target Filename: '%s'\n", filename)
-		fmt.printf("OS Error Code: %v\n", err)
-		return
-	}
 
 	// get the firstkey
 	firstkey := slice.clone(db.memtable.head.next[0].key)
@@ -324,7 +375,7 @@ sstable_flush :: proc(db: ^DB) {
 
 }
 
-// How often do we save a shortcut? 
+// How often do we save a shortcut?
 // 100 means we only index every 100th key.
 
 // A temporary struct to hold index entries in RAM
@@ -335,7 +386,7 @@ IndexEntry :: struct {
 
 // The 3 Blocks of an SSTable File
 
-// Block 1: The Data Block (Sequential) 
+// Block 1: The Data Block (Sequential)
 // What: This is your MemTable dump. You iterate through your Skip List (Level 0) and write every single Key and Value.
 
 // Block 2: The Sparse Index Block (Random Access)
@@ -388,19 +439,27 @@ sstable_write_file :: proc(file: os.Handle, mt: ^Memtable) -> int {
 		current_offset += u64(len(current_node.key))
 
 
-		// Write value length
+		// Write value length (use TOMBSTONE for nil values)
 		value_length_bytes: [8]byte
-		endian.put_u64(
-			value_length_bytes[:],
-			endian.Byte_Order.Little,
-			u64(len(current_node.value)),
-		)
-		os.write(file, value_length_bytes[:])
-		current_offset += 8
+		if current_node.value == nil {
+			// Write TOMBSTONE marker for deleted keys
+			endian.put_u64(value_length_bytes[:], endian.Byte_Order.Little, TOMBSTONE)
+			os.write(file, value_length_bytes[:])
+			current_offset += 8
+			// Don't write any value data for tombstones
+		} else {
+			endian.put_u64(
+				value_length_bytes[:],
+				endian.Byte_Order.Little,
+				u64(len(current_node.value)),
+			)
+			os.write(file, value_length_bytes[:])
+			current_offset += 8
 
-		// Write actual value
-		os.write(file, current_node.value)
-		current_offset += u64(len(current_node.value))
+			// Write actual value
+			os.write(file, current_node.value)
+			current_offset += u64(len(current_node.value))
+		}
 
 		current_node = current_node.next[0]
 		counter += 1
@@ -410,7 +469,7 @@ sstable_write_file :: proc(file: os.Handle, mt: ^Memtable) -> int {
 
 	// <-----BLOCK 2----->
 
-	// Now that we have finished writing from memtable to the file, we need to 
+	// Now that we have finished writing from memtable to the file, we need to
 	// We need to write from the index list.
 	// We simply write it in the form [key_length] [key] [offset]
 
@@ -481,7 +540,7 @@ sstable_find :: proc(
 	os.read(file, footer_buffer[:])
 	index_offset, _ := endian.get_u64(footer_buffer[:], endian.Byte_Order.Little)
 
-	// Seek to the index offset 
+	// Seek to the index offset
 	os.seek(file, i64(index_offset), os.SEEK_SET)
 
 	start_search_offset: i64 = 0
@@ -491,14 +550,14 @@ sstable_find :: proc(
 	// Check for a suitable start position by comparing the key being searched with key data
 	// if the key is smaller, we will set our start_search_offset value equal to the offset value contained in our index block
 	// if we eventually find a larger key, we should stop and possibly set a value end_search_offset to that offset
-	// the reason I think this is a good idea is that if the we get a start_search_offset of say 500th entry, but our block 1 
+	// the reason I think this is a good idea is that if the we get a start_search_offset of say 500th entry, but our block 1
 	// contains 5000 records, we don't want to search the entire store of 4500 other entries until we get back to index block
 	// We want to get an end_search_offset that says we know  the key is less than the 1000th entry.
 	// This way we only read 500 entries before saying we didn't find the key rather than 4500 entries.
 
 	// Looping through index block up until the footer
 	for current_position < (file_size - 8) {
-		// Read the key length 
+		// Read the key length
 		klen_buf: [8]byte
 		os.read(file, klen_buf[:])
 		klen, _ := endian.get_u64(klen_buf[:], endian.Byte_Order.Little)
@@ -536,7 +595,7 @@ sstable_find :: proc(
 	// if we try to loop while curr < end_search_offset, we will have a situation like while 500 < 0 which means the search will fail.
 	// So we can do if statement that if end_search_offset < start_search_offset, then we search till the end of index block
 	// else we search from start_search_offset to end_search_offset. I'm not exactly sure the performance benefits but
-	// But does this even matter? if the end_search_offset is a value we only search the entire array block if the searched 
+	// But does this even matter? if the end_search_offset is a value we only search the entire array block if the searched
 	// key is not in the database. If it is in the database we will find it in the index length window anyway.
 	// So end_search_offset only improves the worst case scenario, which is that the key is not in the database
 	// Example we have indexes "Apple", "Ball", "Box", "Cat", "Cube", "Date", ... "Monkey"... "Zebra" and we are looking for "Condo" but "Condo"
@@ -544,8 +603,8 @@ sstable_find :: proc(
 	// in the database once we hit the position of "Cube", so we are faster at telling the user "not found".
 	// There is no difference however, if "Condo" is in the database/file
 
-	// Well just realized that end_search_offset is not needed because of the sorted nature of the database, if we are searching for a key and 
-	// ever come across a key in the database larger than the key being searched for we can just stop the search because the key being searched for is 
+	// Well just realized that end_search_offset is not needed because of the sorted nature of the database, if we are searching for a key and
+	// ever come across a key in the database larger than the key being searched for we can just stop the search because the key being searched for is
 	// not in the database. So forget the ramblings above.
 
 	for curr < i64(index_offset) {
@@ -567,7 +626,7 @@ sstable_find :: proc(
 		vlen, _ := endian.get_u64(vlen_byte[:], endian.Byte_Order.Little)
 		curr += 8
 
-		// read the actual value 
+		// read the actual value
 		found_value: []byte
 		if vlen == TOMBSTONE {
 			if compare_keys(found_key, key) == 0 {
@@ -584,7 +643,7 @@ sstable_find :: proc(
 
 
 		} else {
-			found_value := make([]byte, vlen)
+			found_value = make([]byte, vlen)
 			os.read(file, found_value[:])
 			curr += i64(vlen)
 		}

@@ -35,7 +35,7 @@ Memtable :: struct {
 //Initialize Memtable
 
 memtable_init :: proc() -> ^Memtable {
-	// Allocate 4Mb of RAM for this table 
+	// Allocate 4Mb of RAM for this table
 	arena_buffer := make([]byte, 6 * constants.MB)
 	mt := new(Memtable)
 	mem.arena_init(&mt.arena, arena_buffer)
@@ -72,7 +72,7 @@ memtable_put :: proc(mt: ^Memtable, key, value: []byte) {
 	update: [constants.MAX_LEVEL]^Node
 	current := mt.head
 
-	// 1. SEARCH: Start top, go down (The "Drop Down" Logic) 
+	// 1. SEARCH: Start top, go down (The "Drop Down" Logic)
 	for i := constants.MAX_LEVEL - 1; i >= 0; i -= 1 {
 		// While the neighbor is smaller than our new key, move forward
 		for current.next[i] != nil && compare_keys(current.next[i].key, key) < 0 {
@@ -89,13 +89,18 @@ memtable_put :: proc(mt: ^Memtable, key, value: []byte) {
 
 	// 2. CHECK DUPLICATE: If key exists, just update value
 	if current != nil && compare_keys(current.key, key) == 0 {
-		// We cannot just say current.value = value.
-		// We must allocate NEW space in the arena for the new value bytes.
-		// Note: The old value bytes are now "wasted" space in the arena. 
-		// This is normal for LSM trees; we reclaim it when we flush to disk.
-		new_value_slice := make([]byte, len(value), mt.allocator)
-		copy(new_value_slice, value)
-		current.value = new_value_slice
+		// Check if this is a DELETE (nil value = tombstone)
+		if value == nil {
+			current.value = nil // Mark as deleted
+		} else {
+			// We cannot just say current.value = value.
+			// We must allocate NEW space in the arena for the new value bytes.
+			// Note: The old value bytes are now "wasted" space in the arena.
+			// This is normal for LSM trees; we reclaim it when we flush to disk.
+			new_value_slice := make([]byte, len(value), mt.allocator)
+			copy(new_value_slice, value)
+			current.value = new_value_slice
+		}
 		return
 	}
 
@@ -112,10 +117,14 @@ memtable_put :: proc(mt: ^Memtable, key, value: []byte) {
 	copy(new_key, key)
 	new_node.key = new_key
 
-	// Make copy of value
-	new_value := make([]byte, len(value), mt.allocator)
-	copy(new_value, value)
-	new_node.value = new_value
+	// Make copy of value (handle nil for tombstones)
+	if value != nil {
+		new_value := make([]byte, len(value), mt.allocator)
+		copy(new_value, value)
+		new_node.value = new_value
+	} else {
+		new_node.value = nil // Tombstone marker
+	}
 
 	new_node.level = lvl
 
@@ -150,13 +159,17 @@ memtable_get :: proc(mt: ^Memtable, key: []byte) -> ([]byte, bool) {
 	// The search gets the item right before the item we are looking for
 	current = current.next[0]
 	if current != nil && compare_keys(current.key, key) == 0 {
+		// Check if this is a tombstone (deleted key)
+		if current.value == nil {
+			return nil, false // Key was deleted
+		}
 		return current.value, true
 	}
 
 	return nil, false
 }
 
-// --- DEBUG: PRINT ALL ---
+// Print all entries in the MemTable (for debugging)
 // Iterates the "Local Track" (Level 0) to prove it is sorted.
 memtable_print :: proc(mt: ^Memtable) {
 	fmt.println("--- MEMTABLE DUMP ---")

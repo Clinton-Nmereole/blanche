@@ -78,8 +78,8 @@ builder_finish :: proc(b: ^SSTableBuilder) {
 
 	for entry in b.index_list {
 		// write key length
-		key_len: [4]byte
-		endian.put_u32(key_len[:], endian.Byte_Order.Little, u32(len(entry.key)))
+		key_len: [8]byte
+		endian.put_u64(key_len[:], endian.Byte_Order.Little, u64(len(entry.key)))
 		os.write(b.file, key_len[:])
 
 		// write key

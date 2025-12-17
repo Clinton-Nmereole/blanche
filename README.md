@@ -45,6 +45,7 @@ Published in: Acta Informatica
 ### ✅ Phase 4: Read Path (Multi-Level Search)
 - **Strategy:** Check newest data first (MemTable → newest SSTable → oldest SSTable)
 - **Index Optimization:** Use sparse index to jump directly to relevant data block
+- **Bloom Filter Integration:** Skip files that definitely don't contain the key
 - **Result:** Sub-millisecond lookups even with data on disk
 
 ### ✅ Phase 5: Compaction (Garbage Collection)
@@ -52,11 +53,28 @@ Published in: Acta Informatica
 - **Deduplication:** Keeps only the newest version of each key
 - **Space Reclamation:** Removes obsolete data and tombstones
 - **Iterator-Based:** Streaming merge for memory efficiency
+- **Multi-Level:** Automatic tiered compaction across 7 levels
+- **Background Worker:** Continuous compaction triggered by size thresholds
 
-### 🚧 Phase 6: Bloom Filters (Planned)
-- **Purpose:** Probabilistic data structure to skip files that definitely don't contain a key
-- **Impact:** 10-100x faster negative lookups (queries for non-existent keys)
+### ✅ Phase 6: Bloom Filters
+- **Implementation:** Murmur64a + FNV64a hash functions
+- **Integration:** Checked in `db_get` for negative lookup optimization
+- **Persistence:** Filters saved alongside SSTables (`.filter` files)
+- **Impact:** 10-100x faster queries for non-existent keys
 - **False Positive Rate:** ~1% (configurable)
+
+### ✅ Phase 7: Manifest (Database Metadata)
+- **Purpose:** Track all SSTable files and their metadata
+- **Contents:** Stores `firstkey`, `lastkey`, `filesize`, `level` for each file
+- **Persistence:** JSON format for human readability
+- **Loading:** Automatic database state restoration on restart
+- **Benefits:** Enables efficient range query planning and file management
+
+### ✅ Phase 8: DELETE Operations
+- **Implementation:** Tombstone markers (nil values in MemTable, TOMBSTONE constant on disk)
+- **Propagation:** Tombstones flow through WAL, MemTable, SSTables
+- **Compaction Integration:** Tombstones removed during merge when safe
+- **API:** `db_delete(db, key)` marks keys as deleted
 
 ## Technical Highlights
 
@@ -95,14 +113,23 @@ Published in: Acta Informatica
 ```
 blanche/
 ├── src/
-│   ├── main.odin       # Test suite and entry point
-│   ├── memtable.odin   # Skip list implementation
-│   ├── wal.odin        # Write-Ahead Log with binary encoding
-│   ├── db.odin         # Main database API and SSTable I/O
-│   ├── compaction.odin # K-way merge iterator and compaction logic
-│   └── builder.odin    # SSTable file builder with sparse indexing
-├── data/               # Database files (.sst, .log)
-└── phase_6_bloom_filters.md  # Next implementation phase
+│   ├── main.odin          # Comprehensive test suite (12 phases, 85+ tests)
+│   ├── memtable.odin      # Skip list implementation with arena allocation
+│   ├── wal.odin           # Write-Ahead Log with binary encoding & recovery
+│   ├── db.odin            # Main database API, flush logic, SSTable I/O
+│   ├── compaction.odin    # K-way merge iterator, multi-level compaction
+│   ├── builder.odin       # SSTable file builder with sparse indexing
+│   ├── bloomfilter.odin   # Probabilistic membership testing
+│   ├── manifest.odin      # Database metadata persistence (JSON format)
+│   ├── data/              # Database files (.sst, .filter, .log, manifest.json)
+│   ├── test_data/         # Test database files
+│   └── blanche            # Compiled test executable
+├── constants/
+│   └── constants.odin     # Shared constants (levels, thresholds, etc.)
+├── tests/                 # Additional test files
+├── phase_6_bloom_filters.md  # Historical implementation notes
+├── OPTIMIZATIONS.md       # Future enhancement roadmap
+└── README.md
 ```
 
 ## Why Odin?
@@ -116,14 +143,22 @@ This project leverages Odin's systems programming strengths:
 
 ## Testing
 
-Each phase includes targeted tests in `main.odin`:
-- **MemTable:** Sorted insertion and retrieval
-- **WAL:** Crash recovery simulation
-- **Flush:** Automatic threshold-triggered persistence
-- **Read Path:** Multi-file search validation
-- **Compaction:** Deduplication and file merging correctness
+Comprehensive test suite in `main.odin` covering **12 phases with 85+ tests**:
 
-Current test focuses on Phase 5, verifying that compaction preserves the newest version of keys across multiple SSTable files.
+1. **MemTable Tests** - Sorted insertion, updates, deletion, clearing
+2. **WAL Tests** - Crash recovery simulation with multi-entry replay
+3. **SSTable Builder** - File format validation, sparse indexing
+4. **SSTable Read Path** - Multi-file search, edge cases, tombstones
+5. **DB Operations** - CRUD operations (Create, Read, Update, Delete)
+6. **DELETE Operations** - Tombstone propagation through all layers
+7. **Flush Operations** - Automatic/manual flushing, threshold triggers
+8. **Compaction** - Multi-file merge, deduplication, version preservation
+9. **Bloom Filters** - False positive rate, save/load persistence
+10. **Manifest** - State persistence, database restart scenarios
+11. **Iterator** - Sequential SSTable scans, ordering validation
+12. **Integration & Stress** - End-to-end workflows, high-volume operations
+
+Run tests: `cd src; odin build . -out:blanche; ./blanche`
 
 ## Performance Characteristics
 
@@ -141,22 +176,43 @@ Current test focuses on Phase 5, verifying that compaction preserves the newest 
 - Time: O(n log m) where m = number of files
 - Space: O(n) output buffer
 
-## What Makes This "Production-Ready" Architecture?
+## What Makes This Production-Quality Architecture?
 
 1. **Crash Safety:** WAL guarantees no data loss even on power failure
-2. **Write Amplification Control:** Compaction is configurable and background
-3. **Read Optimization:** Sparse index + (future) Bloom filters minimize disk I/O
+2. **Write Amplification Control:** Background compaction worker with configurable thresholds
+3. **Read Optimization:** Sparse index + Bloom filters minimize disk I/O
 4. **Memory Efficiency:** Arena allocation prevents fragmentation
-5. **Concurrency-Friendly:** Immutable SSTables allow lock-free reads
+5. **Concurrency-Friendly:** Immutable SSTables allow lock-free reads (future: multi-threaded reads)
+6. **Complete CRUD:** Full Create, Read, Update, Delete operations
+7. **Automatic Management:** Background compaction, manifest persistence, crash recovery
+
+## Current Capabilities
+
+**Supported Operations:**
+- `db_put(db, key, value)` - Write or update a key-value pair
+- `db_get(db, key)` - Retrieve value for a key (returns nil if not found)
+- `db_delete(db, key)` - Mark a key as deleted using tombstones
+- `db_open(path)` - Open or create database at specified path
+- `db_close(db)` - Gracefully shutdown with manifest save
+- `sstable_flush(db)` - Manually trigger MemTable flush to disk
+
+**Automatic Features:**
+- Crash recovery via WAL replay
+- Auto-flush when MemTable exceeds 4MB
+- Background compaction across 7 levels
+- Bloom filter generation and persistence
+- Manifest updates on structural changes
 
 ## Future Enhancements
 
-Beyond Phase 6 (Bloom Filters):
-- **Tombstones:** Proper deletion semantics
-- **Range Queries:** Scan operations (e.g., all keys from "A" to "M")
-- **Leveled Compaction:** Multi-tier file organization for write amplification reduction
-- **Block Cache:** In-memory LRU cache for hot data blocks
-- **Compression:** Snappy/LZ4 for data block encoding
+See `OPTIMIZATIONS.md` for detailed implementation guides. Key missing features:
+
+1. **Range Queries** (`db_scan`) - Infrastructure exists (manifest metadata, iterators)
+2. **Block Cache (LRU)** - 10-100x speedup for hot data
+3. **Compression** - Snappy/LZ4 for 2-5x space savings
+4. **Better Error Handling** - Proper error types and propagation
+5. **Statistics/Metrics** - Observability (reads/writes per second, cache hit rates)
+6. **Configurable Parameters** - Tunable thresholds via options struct
 
 ## Learning Resources
 

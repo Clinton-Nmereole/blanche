@@ -1,5 +1,6 @@
 package blanche
 
+import "../constants"
 import "core:encoding/endian"
 import "core:fmt"
 import "core:os"
@@ -7,7 +8,6 @@ import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:time"
-
 // Well basically what the compaction phase does is merge old sst files into a new "master" sst file
 // We then delete all the other old files
 // This way we save disk space
@@ -145,28 +145,175 @@ compaction_worker :: proc(db: ^DB) {
 	for {
 		time.sleep(1 * time.Second)
 
-		// Check the if len(db.sstable_files) > 5
+		// Check the if level 0 has files more than 15 and compact them
+		// Set the max size for running compaction at level 1
+		threshold_compact_size := 10 * constants.MB
+		need_compaction := false
 		sync.mutex_lock(&db.mutex)
-		if len(db.levels[0]) > 5 {
-			snapshot_files := slice.clone_to_dynamic(db.levels[0][:])
-			count := len(snapshot_files)
-			sync.mutex_unlock(&db.mutex)
-			fmt.println("Compacting...")
-			compacted_handle := db_compact(snapshot_files, db.data_directory)
-			sync.mutex_lock(&db.mutex)
-			db.levels[0] = slice.clone_to_dynamic(db.levels[0][0:len(db.levels[0]) - count])
-			append(&db.levels[0], compacted_handle)
-
+		if len(db.levels[0]) > 15 {
+			need_compaction = true
 		}
 		sync.mutex_unlock(&db.mutex)
+
+		if need_compaction {
+			compact_level_0(db)
+		}
+
+		// loop through the levels
+		for i := 1; i < len(db.levels) - 1; i += 1 {
+			// for every level, check the total size
+			level_size: i64 = 0
+			sync.mutex_lock(&db.mutex)
+			for file in db.levels[i] {
+				level_size += file.meta.filesize
+			}
+			sync.mutex_unlock(&db.mutex)
+			if int(level_size) >= threshold_compact_size {
+				compact_level_n(db, i)
+			}
+			threshold_compact_size *= 10
+
+		}
 
 	}
 
 }
 
+compact_level_0 :: proc(db: ^DB) {
+	// 1. Lock the database (Thread Safety is key!)
+	sync.mutex_lock(&db.mutex)
+	defer sync.mutex_unlock(&db.mutex)
+
+	// 2. Do we even have work to do?
+	if len(db.levels[0]) == 0 {
+		return // Nothing to compact
+	}
+
+	// 3. Pick the victim (Level 0 file)
+	// usually the first one in the list
+	l0_file := db.levels[0][0]
+
+	// 4. Find the overlapping files in Level 1
+	// Use your new helper function: get_overlapping_inputs
+	// ...
+	overlaps := get_overlapping_inputs(l0_file, db.levels[1])
+
+	// 5. Prepare the list for compaction
+	// Remember: [Level 0 File] followed by [Level 1 Files]
+	compaction_list := make([dynamic]SSTableHandle)
+	append(&compaction_list, l0_file)
+	// append the overlaps...
+	for overlap in overlaps {
+		append(&compaction_list, overlap)
+	}
+	fmt.printf("Compacting L0: %s with %d L1 files...\n", l0_file.filename, len(overlaps))
+
+	// 6. Run the heavy lifting (The Compaction)
+	// We unlock during the heavy I/O so readers aren't blocked!
+	sync.mutex_unlock(&db.mutex)
+	new_handle := db_compact(compaction_list, db.data_directory)
+	sync.mutex_lock(&db.mutex)
+
+	// 7. Update the Levels (The Atomic Swap)
+	// A. Remove l0_file from Level 0
+	// B. Remove overlaps from Level 1
+	// C. Add new_handle to Level 1
+	ordered_remove(&db.levels[0], 0)
+
+	new_level_1 := make([dynamic]SSTableHandle)
+	for item in db.levels[1] {
+		is_overlapping := false
+		for overlap in overlaps {
+			if item.filename == overlap.filename {
+				is_overlapping = true
+				break
+			}
+		}
+		if !is_overlapping {
+			append(&new_level_1, item)
+		}
+	}
+
+	// add the compacted file to new_level_1
+	append(&new_level_1, new_handle)
+	slice.sort_by(new_level_1[:], proc(a, b: SSTableHandle) -> bool {
+		return string(a.meta.firstkey) < string(b.meta.firstkey)
+	})
+	db.levels[1] = new_level_1
+	manifest_save(db)
+
+
+}
+
+compact_level_n :: proc(db: ^DB, level_idx: int) {
+	// 1. Lock the database (Thread Safety is key!)
+	sync.mutex_lock(&db.mutex)
+	defer sync.mutex_unlock(&db.mutex)
+
+	// 2. Do we even have work to do?
+	if len(db.levels[level_idx]) == 0 {
+		return // Nothing to compact
+	}
+
+	// 1. Target Level is level_idx + 1
+	next_level_idx := level_idx + 1
+	// 2. Pick a "victim" file from db.levels[level_idx]
+	// (For now, just picking the first one [0] is a fine strategy)
+	target_file := db.levels[level_idx][0]
+
+	// 3. Find overlaps in db.levels[next_level_idx]
+	overlaps := get_overlapping_inputs(target_file, db.levels[next_level_idx])
+
+	// 4. Compact and Update...
+	compaction_list := make([dynamic]SSTableHandle)
+	append(&compaction_list, target_file)
+	// append the overlaps...
+	for overlap in overlaps {
+		append(&compaction_list, overlap)
+	}
+	fmt.printf("Compacting L0: %s with %d L1 files...\n", target_file.filename, len(overlaps))
+
+	// 5. Run the heavy lifting (The Compaction)
+	// We unlock during the heavy I/O so readers aren't blocked!
+	sync.mutex_unlock(&db.mutex)
+	new_handle := db_compact(compaction_list, db.data_directory)
+	sync.mutex_lock(&db.mutex)
+
+	// 6. Update the Levels (The Atomic Swap)
+	// A. Remove l0_file from Level n
+	// B. Remove overlaps from Level n + 1
+	// C. Add new_handle to Level n + 1
+	ordered_remove(&db.levels[level_idx], 0)
+
+	new_level_n_plus := make([dynamic]SSTableHandle)
+
+	for item in db.levels[next_level_idx] {
+		is_overlapping := false
+		for overlap in overlaps {
+			if item.filename == overlap.filename {
+				is_overlapping = true
+				break
+			}
+		}
+		if !is_overlapping {
+			append(&new_level_n_plus, item)
+		}
+	}
+
+	// add the compacted file to new_level_n + 1
+	append(&new_level_n_plus, new_handle)
+	slice.sort_by(new_level_n_plus[:], proc(a, b: SSTableHandle) -> bool {
+		return string(a.meta.firstkey) < string(b.meta.firstkey)
+	})
+	db.levels[next_level_idx] = new_level_n_plus
+	manifest_save(db)
+
+
+}
+
 db_compact :: proc(files: [dynamic]SSTableHandle, data_dir: string) -> SSTableHandle {
 
-	//type of result to return 
+	//type of result to return
 	result: SSTableHandle
 
 
@@ -184,17 +331,12 @@ db_compact :: proc(files: [dynamic]SSTableHandle, data_dir: string) -> SSTableHa
 	// since sstable_files is sorted, iterators[0] will always be the most recent file
 
 	for ssthandle in files {
-		fmt.printf("Attempting to open iterator for: %s\n", ssthandle.filename) // <--- DEBUG 1
 		it := sstable_iterator_init(ssthandle.filename)
 		if it.valid {
-			fmt.println(" -> Success: Iterator Valid.") // <--- DEBUG 2
 			append(&iterators, it)
-		} else {
-			fmt.println(" -> FAILURE: Iterator Invalid!") // <--- DEBUG 3
 		}
 
 	}
-	fmt.printf("Total Active Iterators: %d\n", len(iterators)) // <--- DEBUG 4
 
 	if len(iterators) == 0 {
 		fmt.println("EXITING: No valid iterators found.")
@@ -213,8 +355,11 @@ db_compact :: proc(files: [dynamic]SSTableHandle, data_dir: string) -> SSTableHa
 	temp_filename := fmt.tprintf("%s/compacted.tmp", data_dir)
 	builder := builder_init(temp_filename)
 	if builder == nil {return result} 	// Failed to create file
+	first_key: []byte = nil
+	last_key: []byte = nil
 
-	// Merge Logic 
+
+	// Merge Logic
 
 	//find the minimum key
 	for {
@@ -232,37 +377,35 @@ db_compact :: proc(files: [dynamic]SSTableHandle, data_dir: string) -> SSTableHa
 		min_key := make([]byte, len(best_key_ref))
 		copy(min_key, best_key_ref)
 		defer delete(min_key) // Clean up at the end of this loop iteration
-		// DEBUG 1: Print who the current "Min Key" is
-		fmt.printf("Loop: Min Key is '%s'\n", string(min_key))
 
 		// B. Pick the Winner & Advance Duplicates
 
 		found_winner := false
-
-		for it in iterators { 	//loop through all the iterators 
+		for it in iterators { 	//loop through all the iterators
 
 			//update the total_size_file variable by adding the file_size of the iterators/files
 			if it.valid && compare_keys(it.key, min_key) == 0 { 	// if they are valid and have the smallest key
 
 				if !found_winner { 	// Check if we have found the winner, if not, feed it to the builder.
-					// DEBUG 2: Print who won
-					fmt.printf(
-						" -> Winner Found! Value: '%s' (Writing to builder)\n",
-						string(it.value),
-					)
 					if it.is_tombstone {
 						sstable_iterator_next(it)
 						found_winner = true
 						continue
 					}
 					builder_add(builder, it.key, it.value) // iterators is sorted, so the first it which is a winner is the most recent
+
+					// Always update the last_key (copy it)
+					if last_key != nil {delete(last_key)}
+					last_key = slice.clone(it.key)
+
+					if first_key == nil {first_key = slice.clone(it.key)}
+
 					found_winner = true
 					add(filter, it.key)
 
 
 				} else {
-					// DEBUG 3: Print who got skipped
-					fmt.printf(" -> Duplicate Skipped! Value: '%s'\n", string(it.value))
+					// Duplicate found - skip it
 				}
 
 				sstable_iterator_next(it) // Move to the next item on all iterators that have the winner value
@@ -275,6 +418,7 @@ db_compact :: proc(files: [dynamic]SSTableHandle, data_dir: string) -> SSTableHa
 	// Finish builder
 	// Write Index and Footer and then close the file
 	builder_finish(builder)
+
 
 	// Now since we have a new compacted file, we get rid of all the other files
 	for it in iterators {
@@ -296,11 +440,21 @@ db_compact :: proc(files: [dynamic]SSTableHandle, data_dir: string) -> SSTableHa
 	new_filename := fmt.tprintf("%s/%d.sst", data_dir, new_timestamp)
 	filter_filename := fmt.tprintf("%s/%d.filter", data_dir, new_timestamp)
 
-
 	os.rename(temp_filename, new_filename)
 	save_filter_to_file(filter, filter_filename)
 	result.filter = filter
 	result.filename = new_filename
+
+
+	info_file, info_err := os.stat(new_filename)
+
+	if info_err == os.ERROR_NONE {
+
+		result.meta.filesize = info_file.size
+		os.file_info_delete(info_file)
+
+	}
+
 
 	// Clear the old files from out db
 	//clear(&db.sst_files)
@@ -310,6 +464,8 @@ db_compact :: proc(files: [dynamic]SSTableHandle, data_dir: string) -> SSTableHa
 
 	// Success Message
 	fmt.printf("Compaction Complete. Merged into: %s\n", new_filename)
+	result.meta.firstkey = first_key
+	result.meta.lastkey = last_key
 
 	return result
 

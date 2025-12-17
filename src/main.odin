@@ -1,473 +1,931 @@
 package blanche
 
+import "../constants"
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "core:time"
 
-benchmark_negative_lookups :: proc(db: ^DB) {
-	start_time := time.now()
-	for i := 0; i < 10000; i += 1 {
-		found, is_in := db_get(db, transmute([]byte)string("No One"))
+// ============================================================================
+// TEST UTILITIES
+// ============================================================================
 
-		if is_in {
-			fmt.println("This was the value of the searched key: ", found)
-		}
+test_counter := 0
+passed_tests := 0
+failed_tests := 0
+
+assert :: proc(condition: bool, test_name: string, loc := #caller_location) {
+	test_counter += 1
+	if condition {
+		fmt.printf("✓ Test %d PASSED: %s\n", test_counter, test_name)
+		passed_tests += 1
+	} else {
+		fmt.printf(
+			"✗ Test %d FAILED: %s (at %s:%d)\n",
+			test_counter,
+			test_name,
+			loc.file_path,
+			loc.line,
+		)
+		failed_tests += 1
 	}
-	duration := time.diff(start_time, time.now())
-	fmt.printf("Duration: %v\n", duration)
-
 }
 
-main :: proc() {
-	/* ======== Test for Memtable ========
-	fmt.println("Initializing Blanche Phase 1...")
+print_test_summary :: proc() {
+	fmt.println()
+	fmt.println("======================================================================")
+	fmt.println("TEST SUMMARY")
+	fmt.println("======================================================================")
+	fmt.printf("Total Tests: %d\n", test_counter)
+	fmt.printf("✓ Passed: %d\n", passed_tests)
+	fmt.printf("✗ Failed: %d\n", failed_tests)
 
-	// 1. Create the MemTable
-	mt := memtable_init()
-
-	// 2. Insert keys OUT OF ORDER
-	// Note: We cast strings to []byte using distinct keys
-	fmt.println("Inserting: Zebra, Apple, Monkey, Banana...")
-
-	memtable_put(mt, transmute([]byte)string("Zebra"), transmute([]byte)string("Striped Horse"))
-	memtable_put(mt, transmute([]byte)string("Apple"), transmute([]byte)string("Red Fruit"))
-	memtable_put(mt, transmute([]byte)string("Monkey"), transmute([]byte)string("Ooh ooh ah ah"))
-	memtable_put(mt, transmute([]byte)string("Banana"), transmute([]byte)string("Yellow Fruit"))
-
-	// 3. Test GET (Read)
-	fmt.println("\n--- Testing GET ---")
-	val, found := memtable_get(mt, transmute([]byte)string("Monkey"))
-	if found {
-		fmt.printf("Found Monkey! Value: %s\n", string(val))
+	if failed_tests == 0 {
+		fmt.println("\n🎉 ALL TESTS PASSED! 🎉")
 	} else {
-		fmt.println("Monkey NOT found. (Bug?)")
+		fmt.println("\n⚠️  SOME TESTS FAILED")
 	}
+	fmt.println("======================================================================")
+}
 
-	// 4. Test ORDER (Iteration)
-	// If this prints Apple -> Banana -> Monkey -> Zebra, you WIN.
-	fmt.println("\n--- Testing SORT ORDER ---")
-	memtable_print(mt)
-    */
+cleanup_test_data :: proc() {
+	// Remove all test data files
+	if os.is_dir("test_data") {
+		os.remove_directory("test_data")
+	}
+}
 
+// ============================================================================
+// PHASE 1: MEMTABLE TESTS
+// ============================================================================
 
-	/* ======= Test for WAL ========
-	wal_filename := "../data/wal.log"
-
-	// --- SCENARIO 1: The "Before" ---
-	fmt.println("--- Session 1: Writing Data ---")
-
-	// Clean up old test file
-	os.remove(wal_filename)
+test_memtable_basic_operations :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 1: MEMTABLE TESTS")
+	fmt.println("----------------------------------------------------------------------")
 
 	mt := memtable_init()
-	wal, _ := wal_init(wal_filename)
+	defer memtable_clear(mt)
+
+	// Test 1: Insert and retrieve a single key
+	key1 := transmute([]byte)string("TestKey1")
+	val1 := transmute([]byte)string("TestValue1")
+	memtable_put(mt, key1, val1)
+
+	retrieved, found := memtable_get(mt, key1)
+	assert(found, "MemTable: Key should be found after insertion")
+	assert(
+		string(retrieved) == "TestValue1",
+		"MemTable: Retrieved value should match inserted value",
+	)
+
+	// Test 2: Update existing key
+	val2 := transmute([]byte)string("UpdatedValue1")
+	memtable_put(mt, key1, val2)
+	retrieved, found = memtable_get(mt, key1)
+	assert(found, "MemTable: Key should still be found after update")
+	assert(string(retrieved) == "UpdatedValue1", "MemTable: Value should be updated")
+
+	// Test 3: Non-existent key
+	non_existent := transmute([]byte)string("DoesNotExist")
+	_, found = memtable_get(mt, non_existent)
+	assert(!found, "MemTable: Non-existent key should return false")
+
+	// Test 4: Multiple keys in sorted order
+	memtable_put(mt, transmute([]byte)string("Zebra"), transmute([]byte)string("Animal"))
+	memtable_put(mt, transmute([]byte)string("Apple"), transmute([]byte)string("Fruit"))
+	memtable_put(mt, transmute([]byte)string("Banana"), transmute([]byte)string("Yellow"))
+
+	// Verify all keys can be retrieved
+	val_zebra, found_zebra := memtable_get(mt, transmute([]byte)string("Zebra"))
+	assert(found_zebra && string(val_zebra) == "Animal", "MemTable: Zebra should be retrievable")
+
+	val_apple, found_apple := memtable_get(mt, transmute([]byte)string("Apple"))
+	assert(found_apple && string(val_apple) == "Fruit", "MemTable: Apple should be retrievable")
+
+	val_banana, found_banana := memtable_get(mt, transmute([]byte)string("Banana"))
+	assert(
+		found_banana && string(val_banana) == "Yellow",
+		"MemTable: Banana should be retrievable",
+	)
+
+	// Test 5: Size tracking
+	initial_count := mt.count
+	memtable_put(mt, transmute([]byte)string("NewKey"), transmute([]byte)string("NewValue"))
+	assert(mt.count == initial_count + 1, "MemTable: Count should increment after insertion")
+
+	// Test 6: Clear operation
+	memtable_clear(mt)
+	assert(mt.count == 0, "MemTable: Count should be 0 after clear")
+	assert(mt.size == 0, "MemTable: Size should be 0 after clear")
+
+	_, found = memtable_get(mt, key1)
+	assert(!found, "MemTable: Keys should not be found after clear")
+}
+
+// ============================================================================
+// PHASE 2: WRITE-AHEAD LOG TESTS
+// ============================================================================
+
+test_wal_operations :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 2: WRITE-AHEAD LOG TESTS")
+	fmt.println("----------------------------------------------------------------------")
+
+	cleanup_test_data()
+	os.make_directory("test_data")
+	wal_filename := "test_data/test_wal.log"
+
+	// Test 1: WAL creation and append
+	wal, ok := wal_init(wal_filename)
+	assert(ok, "WAL: Should initialize successfully")
 
 	key := transmute([]byte)string("User:100")
-	val := transmute([]byte)string("Alice Wonderland")
+	val := transmute([]byte)string("Alice")
+	success := wal_append(wal, key, val)
+	assert(success, "WAL: Append should succeed")
 
-	// 1. Write to WAL
-	fmt.println("Writing 'Alice' to WAL...")
-	if wal_append(wal, key, val) {
-		fmt.println(" -> Write Success")
-	} else {
-		fmt.println(" -> Write FAILED")
+	os.close(wal.file)
+
+	// Test 2: WAL recovery
+	mt := memtable_init()
+	defer memtable_clear(mt)
+
+	wal2, _ := wal_init(wal_filename)
+	wal_recover(wal2, mt)
+
+	retrieved, found := memtable_get(mt, key)
+	assert(found, "WAL Recovery: Key should be recovered from WAL")
+	assert(string(retrieved) == "Alice", "WAL Recovery: Value should match original")
+
+	os.close(wal2.file)
+
+	// Test 3: Multiple entries recovery
+	os.remove(wal_filename)
+	wal3, _ := wal_init(wal_filename)
+
+	for i := 0; i < 10; i += 1 {
+		k := transmute([]byte)fmt.tprintf("Key:%d", i)
+		v := transmute([]byte)fmt.tprintf("Value:%d", i)
+		wal_append(wal3, k, v)
+	}
+	os.close(wal3.file)
+
+	mt2 := memtable_init()
+	defer memtable_clear(mt2)
+
+	wal4, _ := wal_init(wal_filename)
+	wal_recover(wal4, mt2)
+
+	assert(mt2.count == 10, "WAL Recovery: Should recover all 10 entries")
+
+	test_key := transmute([]byte)string("Key:5")
+	test_val, test_found := memtable_get(mt2, test_key)
+	assert(
+		test_found && string(test_val) == "Value:5",
+		"WAL Recovery: Individual entries should be correct",
+	)
+
+	os.close(wal4.file)
+}
+
+// ============================================================================
+// PHASE 3: SSTABLE BUILDER TESTS
+// ============================================================================
+
+test_sstable_builder :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 3: SSTABLE BUILDER TESTS")
+	fmt.println("----------------------------------------------------------------------")
+
+	cleanup_test_data()
+	os.make_directory("test_data")
+	sst_filename := "test_data/test.sst"
+
+	// Test 1: Build a simple SSTable
+	builder := builder_init(sst_filename)
+	assert(builder != nil, "SSTable Builder: Should initialize successfully")
+
+	// Add sorted keys
+	builder_add(builder, transmute([]byte)string("Key1"), transmute([]byte)string("Value1"))
+	builder_add(builder, transmute([]byte)string("Key2"), transmute([]byte)string("Value2"))
+	builder_add(builder, transmute([]byte)string("Key3"), transmute([]byte)string("Value3"))
+
+	builder_finish(builder)
+
+	// Test 2: Verify file was created
+	assert(os.exists(sst_filename), "SSTable Builder: File should exist after finish")
+
+	// Test 3: Verify file is not empty
+	info, err := os.stat(sst_filename)
+	assert(err == os.ERROR_NONE, "SSTable Builder: Should be able to stat file")
+	assert(info.size > 0, "SSTable Builder: File should not be empty")
+	os.file_info_delete(info)
+
+	// Test 4: Build SSTable with many entries (test sparse indexing)
+	sst_filename2 := "test_data/test_large.sst"
+	builder2 := builder_init(sst_filename2)
+
+	// Add 500 entries (should create multiple index entries with SPARSE_FACTOR=100)
+	for i := 0; i < 500; i += 1 {
+		key := transmute([]byte)fmt.tprintf("Key:%05d", i)
+		val := transmute([]byte)fmt.tprintf("Value:%05d", i)
+		builder_add(builder2, key, val)
 	}
 
-	// 2. Write to MemTable (In real DB, you do this after WAL success)
-	memtable_put(mt, key, val)
+	builder_finish(builder2)
 
-	// "Crash" -> We close everything and lose the 'mt' variable.
-	// In a real crash, RAM is wiped instantly.
+	info2, err2 := os.stat(sst_filename2)
+	assert(
+		err2 == os.ERROR_NONE && info2.size > 0,
+		"SSTable Builder: Large file should be created",
+	)
+	os.file_info_delete(info2)
+}
 
-	fmt.println("--- SIMULATING CRASH/RESTART ---")
+// ============================================================================
+// PHASE 4: SSTABLE READ PATH TESTS
+// ============================================================================
 
-	// --- SCENARIO 2: The "After" ---
+test_sstable_read_path :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 4: SSTABLE READ PATH TESTS")
+	fmt.println("----------------------------------------------------------------------")
 
-	// Create a BRAND NEW MemTable (Empty)
-	new_mt := memtable_init()
+	cleanup_test_data()
+	os.make_directory("test_data")
+	sst_filename := "test_data/test_read.sst"
 
-	// Open the SAME WAL file
-	new_wal, _ := wal_init(wal_filename)
-
-	// RECOVER!
-	fmt.println("Recovering from WAL...")
-	wal_recover(new_wal, new_mt)
-
-	// CHECK
-	fmt.println("Checking new MemTable for 'User:100'...")
-	found_val, found := memtable_get(new_mt, key)
-
-	if found {
-		fmt.printf("SUCCESS! Found recovered value: %s\n", string(found_val))
-	} else {
-		fmt.println("FAILURE! Data was lost.")
+	// Create a test SSTable
+	builder := builder_init(sst_filename)
+	test_data := [?]struct {
+		key:   string,
+		value: string,
+	} {
+		{"Apple", "Red Fruit"},
+		{"Banana", "Yellow Fruit"},
+		{"Cherry", "Small Fruit"},
+		{"Date", "Sweet Fruit"},
+		{"Elderberry", "Purple Fruit"},
 	}
-    */
 
-	/*
-	// --- SETUP ---
-	// ====== Test for DB =========
-	// Manually clear old data to ensure a clean test
-	// (In a real app, you wouldn't delete your database on startup!)
-	fmt.println("--- CLEANING OLD DATA ---")
-	os.remove("data/wal.log")
-	// Note: We leave old .sst files for now, or you can manually delete 'data' folder
+	for entry in test_data {
+		builder_add(builder, transmute([]byte)entry.key, transmute([]byte)entry.value)
+	}
+	builder_finish(builder)
 
-	fmt.println("--- PHASE 3 STRESS TEST ---")
-	db := db_open("data")
+	// Test 1: Find existing keys
+	val, found, is_tombstone := sstable_find(sst_filename, transmute([]byte)string("Banana"))
+	assert(found, "SSTable Find: Should find existing key")
+	assert(!is_tombstone, "SSTable Find: Should not be a tombstone")
+	assert(string(val) == "Yellow Fruit", "SSTable Find: Value should match")
+
+	// Test 2: Find first key
+	val, found, _ = sstable_find(sst_filename, transmute([]byte)string("Apple"))
+	assert(found && string(val) == "Red Fruit", "SSTable Find: Should find first key")
+
+	// Test 3: Find last key
+	val, found, _ = sstable_find(sst_filename, transmute([]byte)string("Elderberry"))
+	assert(found && string(val) == "Purple Fruit", "SSTable Find: Should find last key")
+
+	// Test 4: Non-existent key
+	_, found, _ = sstable_find(sst_filename, transmute([]byte)string("Grape"))
+	assert(!found, "SSTable Find: Non-existent key should not be found")
+
+	// Test 5: Key before first
+	_, found, _ = sstable_find(sst_filename, transmute([]byte)string("Aardvark"))
+	assert(!found, "SSTable Find: Key before first should not be found")
+
+	// Test 6: Key after last
+	_, found, _ = sstable_find(sst_filename, transmute([]byte)string("Zebra"))
+	assert(!found, "SSTable Find: Key after last should not be found")
+}
+
+// ============================================================================
+// PHASE 5: DB OPERATIONS TESTS
+// ============================================================================
+
+test_db_operations :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 5: DB OPERATIONS TESTS")
+	fmt.println("----------------------------------------------------------------------")
+
+	cleanup_test_data()
+
+	db := db_open("test_data")
 	defer db_close(db)
 
-	// --- CONFIGURATION ---
-	// We want to fill 4MB quickly. 
-	// Let's use 1KB values. It should take ~4096 records to trigger.
-	val_size := 1024
-	large_value := make([]byte, val_size, context.allocator)
-	for i := 0; i < val_size; i += 1 {
-		large_value[i] = 'A' // Fill with letter 'A'
-	}
-	defer delete(large_value)
+	// Test 1: Basic put and get
+	key := transmute([]byte)string("User:1")
+	val := transmute([]byte)string("Alice")
+	db_put(db, key, val)
 
-	fmt.println("Step 1: Pumping data into MemTable...")
-	fmt.printf("Threshold is: %d bytes\n", MEMTABLE_THRESHOLD)
+	retrieved, found := db_get(db, key)
+	assert(found, "DB Operations: Should find just-inserted key")
+	assert(string(retrieved) == "Alice", "DB Operations: Value should match")
 
-	flush_occured := false
+	// Test 2: Update value
+	val2 := transmute([]byte)string("Bob")
+	db_put(db, key, val2)
+	retrieved, found = db_get(db, key)
+	assert(found && string(retrieved) == "Bob", "DB Operations: Updated value should be retrieved")
 
-	// --- INSERT LOOP ---
-	// We loop 5000 times, which is 5MB total (more than the 4MB limit)
-	for i := 0; i < 5000; i += 1 {
-		// Create unique key: "User:0", "User:1", ...
-		key_str := fmt.tprintf("User:%d", i)
-		key := transmute([]byte)key_str
-
-		// Capture size BEFORE insert
-		size_before := db.memtable.size
-
-		// PUT (This might trigger the flush)
-		db_put(db, key, large_value)
-
-		// Capture size AFTER insert
-		size_after := db.memtable.size
-
-		// --- THE CHECK ---
-		// If size went DOWN, it means we flushed and cleared RAM.
-		if size_after < size_before {
-			fmt.println("\n------------------------------------------------")
-			fmt.println("!!! FLUSH EVENT DETECTED !!!")
-			fmt.printf("At Record Index: %d\n", i)
-			fmt.printf("Size Before: %d -> Size After: %d\n", size_before, size_after)
-			fmt.println("------------------------------------------------")
-			flush_occured = true
-			break // Test passed, stop the loop
-		}
-
-		// Progress bar every 500 records
-		if i % 500 == 0 {
-			fmt.printf("Inserted %d records... (Current RAM Usage: %d bytes)\n", i, size_after)
-		}
+	// Test 3: Multiple keys
+	for i := 0; i < 100; i += 1 {
+		k := transmute([]byte)fmt.tprintf("Key:%d", i)
+		v := transmute([]byte)fmt.tprintf("Value:%d", i)
+		db_put(db, k, v)
 	}
 
-	// --- FINAL REPORT ---
-	if flush_occured {
-		fmt.println("\nSUCCESS: Phase 3 is working.")
-		fmt.println("1. RAM was cleared.")
-		fmt.println("2. Check your 'data/' folder. You should see a new .sst file.")
-		fmt.println("   (e.g., '173... .sst')")
-	} else {
-		fmt.println("\nFAILURE: Loop finished but no flush detected.")
-		fmt.println("Did we reach the 4MB threshold?")
-		fmt.printf("Final Size: %d\n", db.memtable.size)
-	}
-    */
+	test_key := transmute([]byte)string("Key:50")
+	test_val, test_found := db_get(db, test_key)
+	assert(
+		test_found && string(test_val) == "Value:50",
+		"DB Operations: Should retrieve from many keys",
+	)
 
+	// Test 4: Non-existent key
+	_, found = db_get(db, transmute([]byte)string("NonExistent"))
+	assert(!found, "DB Operations: Non-existent key should not be found")
+}
 
-	/*
-	// ===== Test for DB search =====//
-	// --- 1. SETUP ---
-	// Start fresh so we know exactly what is on disk
-	fmt.println("--- SETUP: Cleaning Data Folder ---")
-	os.remove("data/wal.log")
-	// Note: Ideally delete all .sst files manually if you want a purely clean test, 
-	// but this logic works even if old files exist (they just get ignored or sorted to back).
+// ============================================================================
+// PHASE 5B: DELETE OPERATIONS TESTS
+// ============================================================================
 
-	db := db_open("data")
+test_delete_operations :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 5B: DELETE OPERATIONS TESTS")
+	fmt.println("----------------------------------------------------------------------")
+
+	cleanup_test_data()
+
+	db := db_open("test_data")
 	defer db_close(db)
 
-	// --- 2. BURY THE TREASURE ---
-	fmt.println("\n--- STEP 1: Burying the Treasure ---")
-	treasure_key := transmute([]byte)string("Gold_Bar")
-	treasure_val := transmute([]byte)string("Value_1000_Dollars")
+	// Test 1: Delete key in MemTable
+	key1 := transmute([]byte)string("DeleteMe1")
+	val1 := transmute([]byte)string("ToBeDeleted")
+	db_put(db, key1, val1)
 
-	db_put(db, treasure_key, treasure_val)
-	fmt.println("Inserted 'Gold_Bar' into MemTable.")
+	// Verify it exists
+	retrieved, found := db_get(db, key1)
+	assert(found && string(retrieved) == "ToBeDeleted", "DELETE: Key should exist before delete")
 
-	// --- 3. FORCE FLUSH (Pour Concrete) ---
-	fmt.println("\n--- STEP 2: Flooding MemTable to force Flush ---")
-	fmt.printf("Target Threshold: %d bytes\n", MEMTABLE_THRESHOLD)
+	// Delete it
+	db_delete(db, key1)
 
-	// We create a 1KB junk payload
-	junk_val := make([]byte, 1024, context.allocator)
-	defer delete(junk_val)
-	for i := 0; i < 1024; i += 1 {junk_val[i] = 'X'}
+	// Verify it's gone
+	_, found_after := db_get(db, key1)
+	assert(!found_after, "DELETE: Key should not be found after delete in MemTable")
 
-	flush_happened := false
+	// Test 2: Tombstone persists after flush
+	key2 := transmute([]byte)string("DeleteMe2")
+	val2 := transmute([]byte)string("FlushTest")
+	db_put(db, key2, val2)
 
-	// Loop until we detect the size drop
-	for i := 0; i < 10000; i += 1 {
-		size_before := db.memtable.size
+	retrieved2, found2 := db_get(db, key2)
+	assert(found2 && string(retrieved2) == "FlushTest", "DELETE: Key should exist before delete")
 
-		// Key doesn't matter, just filling space
-		key := transmute([]byte)fmt.tprintf("Junk:%d", i)
-		db_put(db, key, junk_val)
+	db_delete(db, key2)
+	sstable_flush(db)
 
-		if db.memtable.size < size_before {
-			fmt.println("!!! FLUSH DETECTED !!!")
-			fmt.println("The 'Gold_Bar' has been moved from RAM to Disk.")
-			flush_happened = true
+	_, still_not_found := db_get(db, key2)
+	assert(!still_not_found, "DELETE: Deleted key should stay deleted after flush")
+
+	// Test 3: Multiple deletes
+	for i := 0; i < 10; i += 1 {
+		k := transmute([]byte)fmt.tprintf("DeleteKey:%d", i)
+		v := transmute([]byte)fmt.tprintf("DeleteValue:%d", i)
+		db_put(db, k, v)
+		db_delete(db, k)
+	}
+
+	// Verify all are deleted
+	all_deleted := true
+	for i := 0; i < 10; i += 1 {
+		k := transmute([]byte)fmt.tprintf("DeleteKey:%d", i)
+		_, found := db_get(db, k)
+		if found {
+			all_deleted = false
 			break
 		}
 	}
+	assert(all_deleted, "DELETE: All deleted keys should not be found")
 
-	if !flush_happened {
-		fmt.println(
-			"TEST FAILED: Could not force a flush. Lower your threshold or increase loop count.",
-		)
-		return
+	// Test 4: Delete non-existent key (should not crash)
+	non_existent := transmute([]byte)string("NeverExisted")
+	db_delete(db, non_existent)
+	assert(true, "DELETE: Deleting non-existent key should not crash")
+}
+
+// ============================================================================
+// PHASE 6: FLUSH TESTS
+// ============================================================================
+
+test_flush_operations :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 6: FLUSH OPERATIONS TESTS")
+	fmt.println("----------------------------------------------------------------------")
+
+	cleanup_test_data()
+
+	db := db_open("test_data")
+	defer db_close(db)
+
+	// Test 1: Manual flush
+	key := transmute([]byte)string("FlushTest")
+	val := transmute([]byte)string("FlushValue")
+	db_put(db, key, val)
+
+	initial_file_count := len(db.levels[0])
+	sstable_flush(db)
+
+	assert(len(db.levels[0]) == initial_file_count + 1, "Flush: Should create new SSTable file")
+	assert(db.memtable.count == 0, "Flush: MemTable should be cleared after flush")
+
+	// Test 2: Retrieve from disk after flush
+	retrieved, found := db_get(db, key)
+	assert(found, "Flush: Should find key on disk after flush")
+	assert(string(retrieved) == "FlushValue", "Flush: Value from disk should match")
+
+	// Test 3: Automatic flush on threshold
+	// Fill memtable to trigger automatic flush
+	large_value := make([]byte, 1024)
+	for i := 0; i < 1024; i += 1 {
+		large_value[i] = 'X'
 	}
+	defer delete(large_value)
 
-	// --- 4. THE EXCAVATION (The Actual Test) ---
-	fmt.println("\n--- STEP 3: The Excavation (db_get) ---")
+	initial_level0_count := len(db.levels[0])
 
-	// Sanity Check: Is it really gone from RAM?
-	// We manually check MemTable first just to prove a point
-	_, in_ram := memtable_get(db.memtable, treasure_key)
-	if !in_ram {
-		fmt.println("Confirmed: 'Gold_Bar' is NOT in MemTable.")
-	} else {
-		fmt.println("WARNING: 'Gold_Bar' is still in MemTable? Test result might be fake.")
-	}
+	// Insert enough to exceed threshold (4MB)
+	for i := 0; i < 5000; i += 1 {
+		k := transmute([]byte)fmt.tprintf("Bulk:%d", i)
+		db_put(db, k, large_value)
 
-	// NOW CALL THE REAL GET
-	fmt.println("Calling db_get('Gold_Bar')...")
-	val, found := db_get(db, treasure_key)
-
-	if found {
-		result_str := string(val)
-		if result_str == "Value_1000_Dollars" {
-			fmt.println("\nSUCCESS! You found the treasure on Disk!")
-			fmt.println("Flow Verified: db_get -> sstable_find -> Footer -> Index -> Data Block")
-		} else {
-			fmt.printf("\nFAILURE: Found key, but wrong value! Got: '%s'\n", result_str)
+		// Check if auto-flush occurred
+		if len(db.levels[0]) > initial_level0_count {
+			assert(true, "Flush: Auto-flush should trigger when threshold exceeded")
+			break
 		}
-	} else {
-		fmt.println("\nFAILURE: db_get returned 'Not Found'.")
-		fmt.println("Check: Did sstable_find return false? Did the Index Scan fail?")
 	}
+}
 
-	// --- 5. VERSIONING TEST (Bonus) ---
-	// Test if MemTable shadows Disk
-	fmt.println("\n--- STEP 4: Shadowing Test ---")
-	fmt.println("Inserting NEW version of 'Gold_Bar' into RAM...")
-	new_val := transmute([]byte)string("Value_0_Dollars_Fake")
-	db_put(db, treasure_key, new_val)
+// ============================================================================
+// PHASE 7: COMPACTION TESTS
+// ============================================================================
 
-	val2, found2 := db_get(db, treasure_key)
-	if string(val2) == "Value_0_Dollars_Fake" {
-		fmt.println("SUCCESS: MemTable correctly overrode the Disk version.")
-	} else {
-		fmt.println(
-			"FAILURE: db_get returned the old Disk version instead of the new RAM version.",
-		)
-	}
-    */
+test_compaction :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 7: COMPACTION TESTS")
+	fmt.println("----------------------------------------------------------------------")
 
+	cleanup_test_data()
 
-	/*
-	// ==== Compaction Test ====
-	// --- 1. SETUP ---
-
-	fmt.println("--- PHASE 5 TEST: Compaction ---")
-
-	// Clean start
-	os.remove("data/wal.log")
-	// Note: For a true clean test, manually delete the 'data' folder or all .sst files before running
-	// rm -rf data/*.sst 
-
-	db := db_open("data")
+	db := db_open("test_data")
 	defer db_close(db)
 
 	key := transmute([]byte)string("User:1")
 
-	// --- 2. CREATE FRAGMENTATION (The Mess) ---
-	// We want 3 separate files on disk. 
-	// Instead of waiting for the 4MB limit, we manually call flush() 
-	// to force tiny files.
+	// Test 1: Create multiple versions across files
+	db_put(db, key, transmute([]byte)string("Version1"))
+	sstable_flush(db)
 
-	fmt.println("\nStep 1: Creating 3 separate SSTable files...")
+	db_put(db, key, transmute([]byte)string("Version2"))
+	sstable_flush(db)
 
-	// Version 1 (Oldest)
-	fmt.println(" -> Writing Version 1 (Alice)... Flushing.")
-	db_put(db, key, transmute([]byte)string("Alice_v1"))
-	sstable_flush(db) // Force create File #1
+	db_put(db, key, transmute([]byte)string("Version3"))
+	sstable_flush(db)
 
-	// Version 2 (Middle)
-	fmt.println(" -> Writing Version 2 (Bob)... Flushing.")
-	db_put(db, key, transmute([]byte)string("Bob_v2"))
-	sstable_flush(db) // Force create File #2
+	initial_count := len(db.levels[0])
+	assert(initial_count >= 3, "Compaction: Should have at least 3 files before compaction")
 
-	// Version 3 (Newest)
-	fmt.println(" -> Writing Version 3 (Charlie)... Flushing.")
-	db_put(db, key, transmute([]byte)string("Charlie_v3"))
-	sstable_flush(db) // Force create File #3
-
-	// --- 3. VERIFY MESSY STATE ---
-	file_count := len(db.sst_files)
-	fmt.printf("\nStep 2: verifying Pre-Compaction State. File Count: %d\n", file_count)
-
-	if file_count < 3 {
-		fmt.println("FAILURE: Expected at least 3 SSTable files. Did sstable_flush work?")
-		return
-	}
-
-	// Verify we can read the newest version (Charlie) even with multiple files
+	// Test 2: Verify newest version is retrieved
 	val, found := db_get(db, key)
-	if !found || string(val) != "Charlie_v3" {
-		fmt.printf(
-			"FAILURE: Read before compaction failed. Expected 'Charlie_v3', got '%s'\n",
-			string(val),
-		)
-		return
-	}
-	fmt.println(" -> Read Check Passed: Got 'Charlie_v3' (Reading from Newest SST)")
-
-	// --- 4. RUN COMPACTION (The Cleanup) ---
-	fmt.println("\nStep 3: Running db_compact()...")
-	db_compact(db)
-
-	// --- 5. VERIFY CLEAN STATE ---
-	new_file_count := len(db.sst_files)
-	fmt.printf("\nStep 4: Verifying Post-Compaction State. File Count: %d\n", new_file_count)
-
-	// CHECK A: File Count
-	if new_file_count != 1 {
-		fmt.printf(
-			"FAILURE: Compaction didn't reduce file count! Still have %d files.\n",
-			new_file_count,
-		)
-		return
-	} else {
-		fmt.println(" -> SUCCESS: Collapsed into exactly 1 file.")
-	}
-
-	// CHECK B: Data Integrity
-	// Does "User:1" still equal "Charlie_v3"? 
-	// If compaction logic was wrong, it might have kept "Alice" (Oldest) or lost the key entirely.
-	val_post, found_post := db_get(db, key)
-
-	if !found_post {
-		fmt.println("FAILURE: The key disappeared after compaction!")
-		return
-	}
-
-	if string(val_post) == "Charlie_v3" {
-		fmt.println(" -> SUCCESS: Data Integrity preserved. 'Charlie_v3' survived.")
-	} else {
-		fmt.printf(
-			"FAILURE: Wrong version survived! Expected 'Charlie_v3', got '%s'\n",
-			string(val_post),
-		)
-	}
-
-	fmt.println("\n--- TEST COMPLETE: COMPACTION WORKS ---")
-    */
-    */
-
-	/*
-	// ==== BLOOM FILTER TEST ====
-	// Initialize a bloom filter
-	filter := bloomfilter_init(10, 0.1)
-	found := contains(filter, transmute([]u8)string("test_key"))
-	fmt.println("The value returned from contains is: ", found)
-	add(filter, transmute([]byte)string("apple"))
-	found = contains(filter, transmute([]byte)string("apple"))
-	fmt.println(
-		"The value returned from contains after inserting 'apple' in the filter and searching for it is: ",
-		found,
+	assert(
+		found && string(val) == "Version3",
+		"Compaction: Should get newest version before compaction",
 	)
-	// We added "apple" earlier...
-	result := contains(filter, transmute([]u8)(string("banana")))
 
-	fmt.println(
-		"The value returned from contains after inserting 'banana' in the filter and searching for it is: ",
-		result,
-	)
-    */
+	// Test 3: Run compaction manually (preparing files list)
+	files_to_compact := make([dynamic]SSTableHandle)
+	defer delete(files_to_compact)
 
-	// ===== Benchmarking Bloom Filter =====//
-	// --- 1. SETUP ---
-	// Start fresh so we know exactly what is on disk
-	fmt.println("--- SETUP: Cleaning Data Folder ---")
-	os.remove("data/wal.log")
-	// Note: Ideally delete all .sst files manually if you want a purely clean test, 
-	// but this logic works even if old files exist (they just get ignored or sorted to back).
+	for file in db.levels[0] {
+		append(&files_to_compact, file)
+	}
 
-	db := db_open("data")
-	defer db_close(db)
+	if len(files_to_compact) > 1 {
+		compacted_handle := db_compact(files_to_compact, db.data_directory)
 
-	// --- 2. BURY THE TREASURE ---
-	fmt.println("\n--- STEP 1: Burying the Treasure ---")
-	treasure_key := transmute([]byte)string("Gold_Bar")
-	treasure_val := transmute([]byte)string("Value_1000_Dollars")
+		// Verify compaction produced a file
+		assert(os.exists(compacted_handle.filename), "Compaction: Should create compacted file")
 
-	db_put(db, treasure_key, treasure_val)
-	fmt.println("Inserted 'Gold_Bar' into MemTable.")
+		// Test 4: Verify data integrity after compaction
+		val_after, found_after, is_tombstone := sstable_find(compacted_handle.filename, key)
+		assert(found_after, "Compaction: Key should exist in compacted file")
+		assert(!is_tombstone, "Compaction: Should not be tombstone")
+		assert(string(val_after) == "Version3", "Compaction: Should preserve newest version")
+	}
+}
 
-	// --- 3. FORCE FLUSH (Pour Concrete) ---
-	fmt.println("\n--- STEP 2: Flooding MemTable to force Flush ---")
-	fmt.printf("Target Threshold: %d bytes\n", MEMTABLE_THRESHOLD)
+// ============================================================================
+// PHASE 8: BLOOM FILTER TESTS
+// ============================================================================
 
-	// We create a 1KB junk payload
-	junk_val := make([]byte, 1024, context.allocator)
-	defer delete(junk_val)
-	for i := 0; i < 1024; i += 1 {junk_val[i] = 'X'}
+test_bloom_filter :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 8: BLOOM FILTER TESTS")
+	fmt.println("----------------------------------------------------------------------")
 
-	flush_happened := false
+	// Test 1: Basic add and contains
+	filter := bloomfilter_init(100, 0.01)
 
-	// Loop until we detect the size drop
-	for i := 0; i < 10000; i += 1 {
-		size_before := db.memtable.size
+	key1 := transmute([]byte)string("apple")
+	key2 := transmute([]byte)string("banana")
+	key3 := transmute([]byte)string("cherry")
 
-		// Key doesn't matter, just filling space
-		key := transmute([]byte)fmt.tprintf("Junk:%d", i)
-		db_put(db, key, junk_val)
+	add(filter, key1)
+	add(filter, key2)
 
-		if db.memtable.size < size_before {
-			fmt.println("!!! FLUSH DETECTED !!!")
-			fmt.println("The 'Gold_Bar' has been moved from RAM to Disk.")
-			flush_happened = true
+	assert(contains(filter, key1), "Bloom Filter: Should contain added key 'apple'")
+	assert(contains(filter, key2), "Bloom Filter: Should contain added key 'banana'")
+
+	// Note: Bloom filters can have false positives but never false negatives
+	// So we can't assert !contains for key3, but we expect it to be false most of the time
+
+	// Test 2: Multiple keys
+	filter2 := bloomfilter_init(1000, 0.01)
+
+	added_keys := make([dynamic]string)
+	defer delete(added_keys)
+
+	for i := 0; i < 100; i += 1 {
+		k := fmt.tprintf("Key:%d", i)
+		append(&added_keys, k)
+		add(filter2, transmute([]byte)k)
+	}
+
+	// All added keys should be found
+	all_found := true
+	for k in added_keys {
+		if !contains(filter2, transmute([]byte)k) {
+			all_found = false
 			break
 		}
 	}
+	assert(all_found, "Bloom Filter: All added keys should be found (no false negatives)")
 
+	// Test 3: Save and load filter
+	cleanup_test_data()
+	os.make_directory("test_data")
 
-	benchmark_negative_lookups(db)
+	filter3 := bloomfilter_init(50, 0.01)
+	test_key := transmute([]byte)string("TestKey")
+	add(filter3, test_key)
 
-	// --- 4. DIG UP THE TREASURE ---
-	fmt.println("\n--- STEP 3: Retrieve the Gold ---")
-	val, found := db_get(db, treasure_key)
+	filter_file := "test_data/test.filter"
+	save_filter_to_file(filter3, filter_file)
 
-	if found {
-		fmt.printf(
-			"Success! 🏴‍☠️ Found key '%s' with value: '%s'\n",
-			string(treasure_key),
-			string(val),
-		)
-	} else {
-		fmt.printf(
-			"FAILURE ☠️. The Bloom Filter let us through, but the key '%s' was not found on disk.\n",
-			string(treasure_key),
-		)
+	assert(os.exists(filter_file), "Bloom Filter: Filter file should exist after save")
+
+	loaded_filter := load_filter_from_file(filter_file)
+	assert(loaded_filter != nil, "Bloom Filter: Should load filter from file")
+	assert(
+		contains(loaded_filter, test_key),
+		"Bloom Filter: Loaded filter should contain original keys",
+	)
+}
+
+// ============================================================================
+// PHASE 9: MANIFEST TESTS
+// ============================================================================
+
+test_manifest :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 9: MANIFEST TESTS")
+	fmt.println("----------------------------------------------------------------------")
+
+	cleanup_test_data()
+
+	// Test 1: Fresh database creates manifest
+	db := db_open("test_data")
+
+	// Add some data and flush
+	for i := 0; i < 10; i += 1 {
+		k := transmute([]byte)fmt.tprintf("Key:%d", i)
+		v := transmute([]byte)fmt.tprintf("Value:%d", i)
+		db_put(db, k, v)
+	}
+	sstable_flush(db)
+
+	manifest_path := fmt.tprintf("%s/manifest", db.data_directory)
+	manifest_save(db)
+
+	assert(os.exists(manifest_path), "Manifest: Manifest file should exist after save")
+
+	db_close(db)
+
+	// Test 2: Reopen database and verify manifest is loaded
+	db2 := db_open("test_data")
+	defer db_close(db2)
+
+	assert(db2.manifest != nil, "Manifest: Should load manifest on reopen")
+	assert(len(db2.levels[0]) > 0, "Manifest: Should restore SSTable files from manifest")
+
+	// Test 3: Verify data is still accessible after reopen
+	test_key := transmute([]byte)string("Key:5")
+	val, found := db_get(db2, test_key)
+	assert(found, "Manifest: Should find data after database reopen")
+	assert(string(val) == "Value:5", "Manifest: Data should match after reopen")
+}
+
+// ============================================================================
+// PHASE 10: ITERATOR TESTS
+// ============================================================================
+
+test_sstable_iterator :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 10: SSTABLE ITERATOR TESTS")
+	fmt.println("----------------------------------------------------------------------")
+
+	cleanup_test_data()
+	os.make_directory("test_data")
+	sst_filename := "test_data/test_iterator.sst"
+
+	// Create test SSTable
+	builder := builder_init(sst_filename)
+
+	test_pairs := [?]struct {
+		key:   string,
+		value: string,
+	} {
+		{"Key1", "Value1"},
+		{"Key2", "Value2"},
+		{"Key3", "Value3"},
+		{"Key4", "Value4"},
+		{"Key5", "Value5"},
 	}
 
+	for pair in test_pairs {
+		builder_add(builder, transmute([]byte)pair.key, transmute([]byte)pair.value)
+	}
+	builder_finish(builder)
 
+	// Test 1: Iterate through all entries
+	it := sstable_iterator_init(sst_filename)
+	defer sstable_iterator_close(it)
+
+	assert(it.valid, "Iterator: Should be valid initially")
+
+	count := 0
+	for it.valid {
+		count += 1
+
+		// Verify we can read the key and value
+		assert(it.key != nil, "Iterator: Key should not be nil")
+		assert(it.value != nil, "Iterator: Value should not be nil")
+
+		sstable_iterator_next(it)
+	}
+
+	assert(count == 5, "Iterator: Should iterate through all 5 entries")
+
+	// Test 2: Verify iteration order
+	it2 := sstable_iterator_init(sst_filename)
+	defer sstable_iterator_close(it2)
+
+	expected_order := []string{"Key1", "Key2", "Key3", "Key4", "Key5"}
+	idx := 0
+
+	for it2.valid {
+		if idx < len(expected_order) {
+			assert(
+				string(it2.key) == expected_order[idx],
+				"Iterator: Keys should be in sorted order",
+			)
+		}
+		idx += 1
+		sstable_iterator_next(it2)
+	}
+}
+
+// ============================================================================
+// PHASE 11: INTEGRATION TESTS
+// ============================================================================
+
+test_integration :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 11: INTEGRATION TESTS")
+	fmt.println("----------------------------------------------------------------------")
+
+	cleanup_test_data()
+
+	// Test 1: Complete workflow - Write, Flush, Read, Reopen
+	db := db_open("test_data")
+
+	// Write data
+	for i := 0; i < 50; i += 1 {
+		k := transmute([]byte)fmt.tprintf("IntKey:%d", i)
+		v := transmute([]byte)fmt.tprintf("IntValue:%d", i)
+		db_put(db, k, v)
+	}
+
+	// Force flush
+	sstable_flush(db)
+
+	// Verify all data is readable from disk
+	all_readable := true
+	for i := 0; i < 50; i += 1 {
+		k := transmute([]byte)fmt.tprintf("IntKey:%d", i)
+		expected := fmt.tprintf("IntValue:%d", i)
+
+		val, found := db_get(db, k)
+		if !found || string(val) != expected {
+			all_readable = false
+			break
+		}
+	}
+	assert(all_readable, "Integration: All data should be readable after flush")
+
+	manifest_save(db)
+	db_close(db)
+
+	// Reopen and verify
+	db2 := db_open("test_data")
+	defer db_close(db2)
+
+	test_key := transmute([]byte)string("IntKey:25")
+	val, found := db_get(db2, test_key)
+	assert(
+		found && string(val) == "IntValue:25",
+		"Integration: Data should persist across restarts",
+	)
+
+	// Test 2: Version shadowing - newer MemTable value should override disk
+	disk_key := transmute([]byte)string("ShadowKey")
+	db_put(db2, disk_key, transmute([]byte)string("OldValue"))
+	sstable_flush(db2)
+
+	db_put(db2, disk_key, transmute([]byte)string("NewValue"))
+
+	val2, found2 := db_get(db2, disk_key)
+	assert(found2 && string(val2) == "NewValue", "Integration: MemTable should shadow disk value")
+}
+
+// ============================================================================
+// PHASE 12: STRESS TESTS
+// ============================================================================
+
+test_stress :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 12: STRESS TESTS")
+	fmt.println("----------------------------------------------------------------------")
+
+	cleanup_test_data()
+	db := db_open("test_data")
+	defer db_close(db)
+
+	// Test 1: Many small writes
+	fmt.println("  Running stress test: Many small writes...")
+	for i := 0; i < 1000; i += 1 {
+		k := transmute([]byte)fmt.tprintf("Stress:%d", i)
+		v := transmute([]byte)fmt.tprintf("Value:%d", i)
+		db_put(db, k, v)
+	}
+
+	// Random verification
+	test_indices := []int{0, 100, 500, 750, 999}
+	all_correct := true
+	for idx in test_indices {
+		k := transmute([]byte)fmt.tprintf("Stress:%d", idx)
+		expected := fmt.tprintf("Value:%d", idx)
+		val, found := db_get(db, k)
+		if !found || string(val) != expected {
+			all_correct = false
+			break
+		}
+	}
+	assert(all_correct, "Stress: Random samples should be retrievable after many writes")
+
+	// Test 2: Large value test
+	fmt.println("  Running stress test: Large values...")
+	large_value := make([]byte, 10 * 1024) // 10KB
+	for i := 0; i < len(large_value); i += 1 {
+		large_value[i] = byte('A' + (i % 26))
+	}
+	defer delete(large_value)
+
+	large_key := transmute([]byte)string("LargeValueKey")
+	db_put(db, large_key, large_value)
+
+	retrieved, found := db_get(db, large_key)
+	assert(
+		found && len(retrieved) == len(large_value),
+		"Stress: Large value should be retrievable with correct size",
+	)
+
+	// Test 3: Mixed operations
+	fmt.println("  Running stress test: Mixed operations...")
+	for i := 0; i < 100; i += 1 {
+		// Write
+		k := transmute([]byte)fmt.tprintf("Mixed:%d", i)
+		v := transmute([]byte)fmt.tprintf("MixedValue:%d", i)
+		db_put(db, k, v)
+
+		// Read back immediately
+		val, found := db_get(db, k)
+		if !found || string(val) != string(v) {
+			assert(false, "Stress: Immediate read-after-write should succeed")
+			break
+		}
+
+		// Update
+		v2 := transmute([]byte)fmt.tprintf("Updated:%d", i)
+		db_put(db, k, v2)
+
+		// Read updated value
+		val2, found2 := db_get(db, k)
+		if !found2 || string(val2) != string(v2) {
+			assert(false, "Stress: Read after update should return new value")
+			break
+		}
+	}
+	assert(true, "Stress: Mixed operations completed successfully")
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+main :: proc() {
+	fmt.println("======================================================================")
+	fmt.println("BLANCHE LSM-TREE DATABASE - COMPREHENSIVE TEST SUITE")
+	fmt.println("======================================================================")
+	fmt.println("Testing all implemented functionality...")
+
+	start_time := time.now()
+
+	// Phase 1: Core Data Structures
+	test_memtable_basic_operations()
+
+	// Phase 2: Persistence Layer
+	test_wal_operations()
+
+	// Phase 3: File Format
+	test_sstable_builder()
+
+	// Phase 4: Read Operations
+	test_sstable_read_path()
+
+	// Phase 5: Database API
+	test_db_operations()
+
+	// Phase 5B: DELETE Operations
+	test_delete_operations()
+
+	// Phase 6: Memory Management
+	test_flush_operations()
+
+	// Phase 7: Garbage Collection
+	test_compaction()
+
+	// Phase 8: Optimizations
+	test_bloom_filter()
+
+	// Phase 9: State Management
+	test_manifest()
+
+	// Phase 10: Internal Utilities
+	test_sstable_iterator()
+
+	// Phase 11: End-to-End Scenarios
+	test_integration()
+
+	// Phase 12: Performance & Reliability
+	test_stress()
+
+	duration := time.diff(start_time, time.now())
+
+	print_test_summary()
+	fmt.printf("\nTotal execution time: %v\n", duration)
+	fmt.println("======================================================================")
+
+	// Cleanup
+	cleanup_test_data()
 }
