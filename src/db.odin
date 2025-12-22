@@ -63,6 +63,13 @@ db_iterator_init :: proc(db: ^DB, start_key, end_key: []byte) -> ^DBIterator {
 
 	}
 
+	if db_iter.mem_iter != nil || len(db_iter.sst_iters) > 0 {
+		db_iter.valid = true
+	} else {
+		db_iter.valid = false
+	}
+	db_iterator_next(db_iter) // prime the iterator to have the first key-value pair
+
 	return db_iter
 }
 
@@ -70,8 +77,14 @@ db_iterator_next :: proc(db_iter: ^DBIterator) {
 
 	for {
 		// So we are going to first free old memory from the previous call
-		if db_iter.key != nil {delete(db_iter.key)}
-		if db_iter.value != nil {delete(db_iter.value)}
+		if db_iter.key != nil {
+			delete(db_iter.key)
+			db_iter.key = nil
+		}
+		if db_iter.value != nil {
+			delete(db_iter.value)
+			db_iter.value = nil
+		}
 
 		// next we are going to find the minimum key. To do this we will look at all iterators to find the min_key
 		// since the memtable is sorted, we know that the minimum key from a memtable is the first key
@@ -364,6 +377,9 @@ db_delete :: proc(db: ^DB, key: []byte) {
 }
 
 
+//BUG: Does not work as intended, currently it picks all the files that contain the range given.
+//BUG: However, there is no stop check, so the iterator simply returns all the keys until the DBIterator is no longer valid.
+//BUG: We need to have a check to see if the iterator has reached the end key, if it has then stop the iterator by setting valid to false.
 db_scan :: proc(db: ^DB, start_key, end_key: []byte) -> ^DBIterator {
 	db_iter := db_iterator_init(db, start_key, end_key)
 	return db_iter

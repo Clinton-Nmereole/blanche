@@ -150,7 +150,7 @@ compaction_worker :: proc(db: ^DB) {
 		threshold_compact_size := 10 * constants.MB
 		need_compaction := false
 		sync.mutex_lock(&db.mutex)
-		if len(db.levels[0]) > 15 {
+		if len(db.levels[0]) > 4 {
 			need_compaction = true
 		}
 		sync.mutex_unlock(&db.mutex)

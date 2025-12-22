@@ -785,6 +785,21 @@ test_integration :: proc() {
 
 	val2, found2 := db_get(db2, disk_key)
 	assert(found2 && string(val2) == "NewValue", "Integration: MemTable should shadow disk value")
+
+	// Test 3: Testing db_scan
+	db_iter := db_scan(
+		db2,
+		transmute([]byte)string("IntKey:0"),
+		transmute([]byte)string("IntKey:7"),
+	)
+
+
+	for db_iter.valid {
+		fmt.println(string(db_iter.key), " : ", string(db_iter.value))
+		db_iterator_next(db_iter)
+	}
+
+	db_iterator_close(db_iter)
 }
 
 // ============================================================================
