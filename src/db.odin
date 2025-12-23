@@ -33,6 +33,7 @@ DBIterator :: struct {
 	valid:     bool,
 	key:       []byte,
 	value:     []byte,
+	end_key:   []byte,
 }
 
 db_iterator_init :: proc(db: ^DB, start_key, end_key: []byte) -> ^DBIterator {
@@ -62,6 +63,10 @@ db_iterator_init :: proc(db: ^DB, start_key, end_key: []byte) -> ^DBIterator {
 		}
 
 	}
+
+	// Set the stop value. We want it to persist, so a clone should be the best way
+	db_iter.end_key = slice.clone(end_key)
+
 
 	if db_iter.mem_iter != nil || len(db_iter.sst_iters) > 0 {
 		db_iter.valid = true
@@ -106,7 +111,7 @@ db_iterator_next :: proc(db_iter: ^DBIterator) {
 
 		// if the min_key is nil after the previous step that means the current memtable key is nil. (We reached the end of the memtable)
 		// it also means that we reached the end of all our sst files.
-		if min_key == nil {
+		if min_key == nil || compare_keys(min_key, db_iter.end_key) > 0 {
 			db_iter.valid = false
 			fmt.println("We have reached the end or have run out of valid iterators")
 			return
