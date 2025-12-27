@@ -1,6 +1,5 @@
 package blanche
 
-import "../constants"
 import "core:encoding/endian"
 import "core:fmt"
 import "core:mem"
@@ -177,6 +176,7 @@ db_iterator_next :: proc(db_iter: ^DBIterator) {
 db_iterator_close :: proc(db_iter: ^DBIterator) {
 	if db_iter.key != nil {delete(db_iter.key)}
 	if db_iter.value != nil {delete(db_iter.value)}
+	if db_iter.end_key != nil {delete(db_iter.end_key)}
 	for iter in db_iter.sst_iters {
 		sstable_iterator_close(iter)
 	}
@@ -187,7 +187,7 @@ db_iterator_close :: proc(db_iter: ^DBIterator) {
 }
 
 // CONSTANT: When do we freeze and flush? (4MB)
-MEMTABLE_THRESHOLD :: 4 * constants.MB
+MEMTABLE_THRESHOLD :: 4 * MB
 
 // basically initialize the DB, and recover from WAL incase there was a failure
 db_open :: proc(dir: string) -> ^DB {
@@ -201,7 +201,7 @@ db_open :: proc(dir: string) -> ^DB {
 
 	// 1. Initialize the Levels
 	// We create a slot for every possible level
-	for i := 0; i < constants.MAX_LEVEL; i += 1 {
+	for i := 0; i < MAX_LEVEL; i += 1 {
 		lvl := make([dynamic]SSTableHandle)
 		append(&db.levels, lvl)
 	}
@@ -382,9 +382,6 @@ db_delete :: proc(db: ^DB, key: []byte) {
 }
 
 
-//BUG: Does not work as intended, currently it picks all the files that contain the range given.
-//BUG: However, there is no stop check, so the iterator simply returns all the keys until the DBIterator is no longer valid.
-//BUG: We need to have a check to see if the iterator has reached the end key, if it has then stop the iterator by setting valid to false.
 db_scan :: proc(db: ^DB, start_key, end_key: []byte) -> ^DBIterator {
 	db_iter := db_iterator_init(db, start_key, end_key)
 	return db_iter

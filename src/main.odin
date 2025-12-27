@@ -1,6 +1,5 @@
 package blanche
 
-import "../constants"
 import "core:fmt"
 import "core:os"
 import "core:slice"

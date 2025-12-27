@@ -1,6 +1,5 @@
 package blanche
 
-import "../constants"
 import "core:encoding/endian"
 import "core:fmt"
 import "core:os"
@@ -147,7 +146,7 @@ compaction_worker :: proc(db: ^DB) {
 
 		// Check the if level 0 has files more than 15 and compact them
 		// Set the max size for running compaction at level 1
-		threshold_compact_size := 10 * constants.MB
+		threshold_compact_size := 10 * MB
 		need_compaction := false
 		sync.mutex_lock(&db.mutex)
 		if len(db.levels[0]) > 4 {

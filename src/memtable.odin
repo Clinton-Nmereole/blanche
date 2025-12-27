@@ -1,6 +1,5 @@
 package blanche
 
-import "../constants"
 import "core:bufio"
 import "core:bytes"
 import "core:fmt"
@@ -19,7 +18,7 @@ Node :: struct {
 	// This is a fixed-size array of pointers to the next nodes.
 	// next[0] is the bottom link (points to the immediate next node).
 	// next[MAX_LEVEL-1] is the highest potential link.
-	next:  [constants.MAX_LEVEL]^Node,
+	next:  [MAX_LEVEL]^Node,
 	level: int,
 }
 
@@ -47,7 +46,7 @@ memtable_iterator_init :: proc(mt: ^Memtable) -> ^MemtableIterator {
 
 memtable_init :: proc() -> ^Memtable {
 	// Allocate 4Mb of RAM for this table
-	arena_buffer := make([]byte, 6 * constants.MB)
+	arena_buffer := make([]byte, 6 * MB)
 	mt := new(Memtable)
 	mem.arena_init(&mt.arena, arena_buffer)
 	mt.allocator = mem.arena_allocator(&mt.arena)
@@ -55,7 +54,7 @@ memtable_init :: proc() -> ^Memtable {
 	// Create the Dummy Head Node
 	// It must be the tallest possible node (MAX_LEVEL) so it can reach everything.
 	mt.head = new(Node, mt.allocator)
-	mt.head.level = constants.MAX_LEVEL
+	mt.head.level = MAX_LEVEL
 
 	return mt
 }
@@ -66,7 +65,7 @@ random_level :: proc() -> int {
 	lvl := 1
 	// While we are below the max AND the coin flip is heads (0.5 probability)
 	// rand.float32() returns 0.0 to 1.0.
-	for lvl < constants.MAX_LEVEL && rand.float32() < 0.5 {
+	for lvl < MAX_LEVEL && rand.float32() < 0.5 {
 		lvl += 1
 	}
 	return lvl
@@ -80,11 +79,11 @@ compare_keys :: proc(a, b: []byte) -> int {
 // Insert into the memtable
 memtable_put :: proc(mt: ^Memtable, key, value: []byte) {
 	// update tracks the path that we took
-	update: [constants.MAX_LEVEL]^Node
+	update: [MAX_LEVEL]^Node
 	current := mt.head
 
 	// 1. SEARCH: Start top, go down (The "Drop Down" Logic)
-	for i := constants.MAX_LEVEL - 1; i >= 0; i -= 1 {
+	for i := MAX_LEVEL - 1; i >= 0; i -= 1 {
 		// While the neighbor is smaller than our new key, move forward
 		for current.next[i] != nil && compare_keys(current.next[i].key, key) < 0 {
 			current = current.next[i]
@@ -160,7 +159,7 @@ memtable_get :: proc(mt: ^Memtable, key: []byte) -> ([]byte, bool) {
 	current := mt.head
 
 	// Same search as used in memtable_put(), but there is no need for update because we are not writing any Nodes.
-	for i := constants.MAX_LEVEL - 1; i >= 0; i -= 1 {
+	for i := MAX_LEVEL - 1; i >= 0; i -= 1 {
 		// While the neighbor is smaller than our new key, move forward
 		for current.next[i] != nil && compare_keys(current.next[i].key, key) < 0 {
 			current = current.next[i]
@@ -194,7 +193,7 @@ memtable_print :: proc(mt: ^Memtable) {
 		)
 		node = node.next[0]
 	}
-	fmt.printf("Memtable Size: %d bytes of %d bytes \n", mt.size, 4 * constants.MB)
+	fmt.printf("Memtable Size: %d bytes of %d bytes \n", mt.size, 4 * MB)
 	fmt.println("---------------------")
 }
 
@@ -204,7 +203,7 @@ memtable_clear :: proc(mt: ^Memtable) {
 
 	// We wiped the Head node too! We must recreate it.
 	mt.head = new(Node, mt.allocator)
-	mt.head.level = constants.MAX_LEVEL
+	mt.head.level = MAX_LEVEL
 
 	// Reset size counter
 	mt.size = 0

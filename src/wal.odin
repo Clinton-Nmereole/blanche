@@ -1,6 +1,5 @@
 package blanche
 
-import "../constants"
 import "core:encoding/endian"
 import "core:fmt"
 import "core:mem"
