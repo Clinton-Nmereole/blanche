@@ -4,8 +4,6 @@ import "core:encoding/endian"
 import "core:fmt"
 import "core:os"
 
-SPARSE_FACTOR :: 100
-TOMBSTONE :: max(u64)
 
 SSTableBuilder :: struct {
 	file:           os.Handle, // the output file

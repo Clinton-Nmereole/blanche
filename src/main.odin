@@ -49,8 +49,25 @@ print_test_summary :: proc() {
 }
 
 cleanup_test_data :: proc() {
-	// Remove all test data files
-	if os.is_dir("test_data") {
+	if os.exists("test_data") {
+		// 1. Open the directory so we can see what's inside
+		dir_handle, err := os.open("test_data", os.O_RDONLY)
+		if err == os.ERROR_NONE {
+			defer os.close(dir_handle)
+
+			// 2. Read all the files in the directory
+			files, _ := os.read_dir(dir_handle, -1)
+
+			// 3. Delete every single file first 🔫
+			for f in files {
+				os.remove(f.fullpath)
+			}
+
+			// Clean up the memory used by the file list
+			os.file_info_slice_delete(files)
+		}
+
+		// 4. NOW we can safely remove the empty directory
 		os.remove_directory("test_data")
 	}
 }
@@ -258,6 +275,7 @@ test_sstable_read_path :: proc() {
 
 	cleanup_test_data()
 	os.make_directory("test_data")
+	db := db_open("test_data")
 	sst_filename := "test_data/test_read.sst"
 
 	// Create a test SSTable
@@ -279,29 +297,29 @@ test_sstable_read_path :: proc() {
 	builder_finish(builder)
 
 	// Test 1: Find existing keys
-	val, found, is_tombstone := sstable_find(sst_filename, transmute([]byte)string("Banana"))
+	val, found, is_tombstone := sstable_find(db, sst_filename, transmute([]byte)string("Banana"))
 	assert(found, "SSTable Find: Should find existing key")
 	assert(!is_tombstone, "SSTable Find: Should not be a tombstone")
 	assert(string(val) == "Yellow Fruit", "SSTable Find: Value should match")
 
 	// Test 2: Find first key
-	val, found, _ = sstable_find(sst_filename, transmute([]byte)string("Apple"))
+	val, found, _ = sstable_find(db, sst_filename, transmute([]byte)string("Apple"))
 	assert(found && string(val) == "Red Fruit", "SSTable Find: Should find first key")
 
 	// Test 3: Find last key
-	val, found, _ = sstable_find(sst_filename, transmute([]byte)string("Elderberry"))
+	val, found, _ = sstable_find(db, sst_filename, transmute([]byte)string("Elderberry"))
 	assert(found && string(val) == "Purple Fruit", "SSTable Find: Should find last key")
 
 	// Test 4: Non-existent key
-	_, found, _ = sstable_find(sst_filename, transmute([]byte)string("Grape"))
+	_, found, _ = sstable_find(db, sst_filename, transmute([]byte)string("Grape"))
 	assert(!found, "SSTable Find: Non-existent key should not be found")
 
 	// Test 5: Key before first
-	_, found, _ = sstable_find(sst_filename, transmute([]byte)string("Aardvark"))
+	_, found, _ = sstable_find(db, sst_filename, transmute([]byte)string("Aardvark"))
 	assert(!found, "SSTable Find: Key before first should not be found")
 
 	// Test 6: Key after last
-	_, found, _ = sstable_find(sst_filename, transmute([]byte)string("Zebra"))
+	_, found, _ = sstable_find(db, sst_filename, transmute([]byte)string("Zebra"))
 	assert(!found, "SSTable Find: Key after last should not be found")
 }
 
@@ -531,7 +549,7 @@ test_compaction :: proc() {
 		assert(os.exists(compacted_handle.filename), "Compaction: Should create compacted file")
 
 		// Test 4: Verify data integrity after compaction
-		val_after, found_after, is_tombstone := sstable_find(compacted_handle.filename, key)
+		val_after, found_after, is_tombstone := sstable_find(db, compacted_handle.filename, key)
 		assert(found_after, "Compaction: Key should exist in compacted file")
 		assert(!is_tombstone, "Compaction: Should not be tombstone")
 		assert(string(val_after) == "Version3", "Compaction: Should preserve newest version")
@@ -605,6 +623,47 @@ test_bloom_filter :: proc() {
 		contains(loaded_filter, test_key),
 		"Bloom Filter: Loaded filter should contain original keys",
 	)
+}
+
+// ============================================================================
+// PHASE 8B: BLOCK CACHE TESTS
+// ============================================================================
+
+test_block_cache :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 8B: BLOCK CACHE TESTS")
+	fmt.println("----------------------------------------------------------------------")
+
+	cleanup_test_data()
+	db := db_open("test_data")
+	defer db_close(db)
+
+	// 1. Create a key and flush it to disk
+	key := transmute([]byte)string("CacheTestKey")
+	val := transmute([]byte)string("CacheTestValue")
+	db_put(db, key, val)
+	sstable_flush(db)
+
+	// 2. First Read: Should load from Disk -> Cache
+	val1, found1 := db_get(db, key)
+	assert(found1, "Block Cache: Should find key on disk")
+	assert(string(val1) == "CacheTestValue", "Block Cache: Value should match")
+
+	// 3. Second Read: Should hit the Cache
+	// We verify that the data is still retrievable and correct.
+	// (Internally, this path should now be skipping the disk read for the data block)
+	val2, found2 := db_get(db, key)
+	assert(found2, "Block Cache: Should find key on second attempt (Cache Hit)")
+	assert(string(val2) == "CacheTestValue", "Block Cache: Cached value should match")
+
+	// 4. Verify no data corruption
+	// Sometimes cache implementations can return references to memory that gets overwritten.
+	// We want to ensure our cached copy is stable.
+	val3, found3 := db_get(db, key)
+	assert(found3 && string(val3) == "CacheTestValue", "Block Cache: Data stability check")
+
+	fmt.println("  ✓ Verified: Cache logic executes without errors")
 }
 
 // ============================================================================
@@ -921,6 +980,7 @@ main :: proc() {
 
 	// Phase 8: Optimizations
 	test_bloom_filter()
+	test_block_cache()
 
 	// Phase 9: State Management
 	test_manifest()

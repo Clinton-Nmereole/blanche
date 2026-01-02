@@ -1,5 +1,6 @@
 package blanche
 
+import "core:container/lru"
 import "core:encoding/endian"
 import "core:fmt"
 import "core:mem"
@@ -23,6 +24,7 @@ DB :: struct {
 	manifest:       ^Manifest,
 	levels:         [dynamic][dynamic]SSTableHandle,
 	mutex:          sync.Mutex,
+	block_cache:    ^BlockCache,
 }
 
 DBIterator :: struct {
@@ -253,11 +255,16 @@ db_open :: proc(dir: string) -> ^DB {
 	// 3. Initialize Memtable
 	db.memtable = memtable_init()
 
-	// 4. Initialize WAL
+	// 4. Initialize Block Cache
+	db.block_cache = new(BlockCache)
+	db.block_cache.max_memory_usage = BLOCK_CACHE_SIZE
+	lru.init(&db.block_cache.internal_cache, 1024)
+
+	// 5. Initialize WAL
 	wal_path := fmt.tprintf("%s/wal.log", dir)
 	db.wal, _ = wal_init(wal_path)
 
-	// 5. Recovery
+	// 6. Recovery
 	wal_recover(db.wal, db.memtable)
 
 	return db
@@ -318,7 +325,7 @@ db_get :: proc(db: ^DB, key: []byte) -> ([]byte, bool) {
 			continue
 		}
 
-		val, found, is_tombstone := sstable_find(sstable.filename, key)
+		val, found, is_tombstone := sstable_find(db, sstable.filename, key)
 		if found {
 			if is_tombstone {
 				return nil, false
@@ -345,7 +352,7 @@ db_get :: proc(db: ^DB, key: []byte) -> ([]byte, bool) {
 				}
 
 				// if bloom filter says maybe, then we search the file while being aware of tombstones
-				val, found, is_tombstone := sstable_find(sstable.filename, key)
+				val, found, is_tombstone := sstable_find(db, sstable.filename, key)
 				if found {
 					if is_tombstone {
 						return nil, false
@@ -605,6 +612,7 @@ sstable_write_file :: proc(file: os.Handle, mt: ^Memtable) -> int {
 // We need a function that takes a filename and a key, and returns the value (or not found)
 
 sstable_find :: proc(
+	db: ^DB,
 	filename: string,
 	key: []byte,
 ) -> (
@@ -612,6 +620,8 @@ sstable_find :: proc(
 	is_found: bool,
 	is_tombstone: bool,
 ) {
+	// DEBUG TRACE 🕵️‍♂️
+	fmt.printf("Checking file: %s for key: %s\n", filename, string(key))
 
 	// First we open the file
 	file, err := os.open(filename, os.O_RDONLY)
@@ -633,6 +643,7 @@ sstable_find :: proc(
 	footer_buffer: [8]byte
 	os.read(file, footer_buffer[:])
 	index_offset, _ := endian.get_u64(footer_buffer[:], endian.Byte_Order.Little)
+	fmt.printf("  Index starts at: %d\n", index_offset)
 
 	// Seek to the index offset
 	os.seek(file, i64(index_offset), os.SEEK_SET)
@@ -668,12 +679,15 @@ sstable_find :: proc(
 		offset, _ := endian.get_u64(offset_buf[:], endian.Byte_Order.Little)
 		current_position += 8
 
+		// Debug the Index
+		fmt.printf("    Index Entry: %s -> Offset %d\n", string(key_buf), offset)
+
 		// Compare to find key
 		cmp := compare_keys(key_buf, key)
 		delete(key_buf) // clean key_buf from heap
 
 		if cmp <= 0 {
-			start_search_offset += i64(offset)
+			start_search_offset = i64(offset)
 		} else {
 			//end_search_offset += i64(offset)
 			break
@@ -681,9 +695,38 @@ sstable_find :: proc(
 
 	}
 
+	//Initialize cache key
+	cache_key := CacheKey {
+		filename = filename,
+		offset   = u64(start_search_offset),
+	}
+
+	//Check the Block Cache
+	cached_block, found_in_cache := lru.get(&db.block_cache.internal_cache, cache_key)
+
+	if found_in_cache {
+		fmt.println("  Cache Hit! ⚡")
+		val, found := search_block(cached_block, key)
+		if found {
+			if val == nil {
+				// Found, but it's a tombstone (deleted)
+				return nil, true, true
+			}
+			// Found valid value
+			return val, true, false
+		} else {
+			// Block is here, but key is not in it.
+			// Since the Index said "If it's anywhere, it's in THIS block",
+			// we know it's not in this file.
+			return nil, false, false
+		}
+
+
+	}
+	fmt.println("  Cache Miss. Reading Disk... 🐢")
+
 	// Ok, Jump to the start_search_offset or the O and read till the end_search_offset
 	os.seek(file, start_search_offset, os.SEEK_SET)
-	curr := start_search_offset
 
 	// Interesting, but if the item being searched is larger than the largest index, end_search_offset will remain 0
 	// if we try to loop while curr < end_search_offset, we will have a situation like while 500 < 0 which means the search will fail.
@@ -701,67 +744,26 @@ sstable_find :: proc(
 	// ever come across a key in the database larger than the key being searched for we can just stop the search because the key being searched for is
 	// not in the database. So forget the ramblings above.
 
-	for curr < i64(index_offset) {
-		// read the key length
-		klen_byte: [8]byte
-		_, err := os.read(file, klen_byte[:])
-		if err != nil {break}
-		klen, _ := endian.get_u64(klen_byte[:], endian.Byte_Order.Little)
-		curr += 8
+	// Read the full 4KB block
+	buffer := make([]byte, 4096)
+	bytes_read, _ := os.read(file, buffer)
+	fmt.printf("  Read %d bytes from disk.\n", bytes_read)
 
-		// read the actual key
-		found_key := make([]byte, klen)
-		os.read(file, found_key[:])
-		curr += i64(klen)
+	// UPDATE CACHE 💾
+	// Save this block so we don't have to read it next time
+	lru.set(&db.block_cache.internal_cache, cache_key, buffer)
 
-		// read the value length
-		vlen_byte: [8]byte
-		os.read(file, vlen_byte[:])
-		vlen, _ := endian.get_u64(vlen_byte[:], endian.Byte_Order.Little)
-		curr += 8
+	// Search the fresh buffer
+	val, found := search_block(buffer, key)
 
-		// read the actual value
-		found_value: []byte
-		if vlen == TOMBSTONE {
-			if compare_keys(found_key, key) == 0 {
-				found_value = nil
-				os.seek(file, i64(vlen), os.SEEK_CUR)
-				curr += i64(vlen)
-				return found_value, true, true
-			} else {
-				//os.seek(file, i64(vlen), os.SEEK_CUR) //No need to seek, since this is a tombstone value, the value will be blank
-				curr += i64(vlen)
-
-
-			}
-
-
-		} else {
-			found_value = make([]byte, vlen)
-			os.read(file, found_value[:])
-			curr += i64(vlen)
+	if found {
+		fmt.println("  FOUND in Disk Block! ✅")
+		if val == nil {
+			return nil, true, true
 		}
-
-		// Check if the found key is equal to the key being searched
-		cmp := compare_keys(found_key, key)
-		// clean up found_key allocated with make, we don't need it anymore
-		delete(found_key)
-		if cmp == 0 {
-			// We found the key
-			return found_value, true, false
-		}
-		if cmp > 0 {
-			// We found a key greater than the key being searched, since the database is sorted we can end search
-			// because that means the key is not in the database
-			delete(found_value) // since the key is not in the database clean up found_value allocated with make
-			return nil, false, false
-		}
-
-		delete(found_value) // clean up in the case that we are still searching (we haven't found the key yet)
-
-
+		return val, true, false
 	}
-
+	fmt.println("  NOT FOUND in Disk Block. ❌")
 
 	return nil, false, false
 
