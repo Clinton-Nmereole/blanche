@@ -3,12 +3,11 @@
 > **Note:** This document only lists features and optimizations that are **NOT** currently implemented. All existing features (MemTable, WAL, SSTables, Compaction, Bloom Filters, Manifest, Multi-level Storage, DELETE/Tombstones) are excluded.
 
 ---
-## 📊 High-Impact Improvements
+## 📊 High-Impact Improvements (COMPLETED!!!)
 
 ### 1. Block Cache (LRU Cache for Hot Data)
-**Status:** ❌ Not Implemented  
+**Status:** ✅Implemented  
 **Impact:** **MEDIUM-HIGH** - 10-100x speedup for repeated reads  
-**Effort:** ~3-4 hours
 
 **What it is:**
 Keep frequently accessed data blocks in RAM to avoid disk I/O
@@ -20,16 +19,16 @@ Keep frequently accessed data blocks in RAM to avoid disk I/O
 
 **Implementation approach:**
 ```odin
-BlockCache :: struct {
-    cache: map[CacheKey][]byte,  // filename+offset -> data
-    lru_list: [dynamic]CacheKey,
-    max_size: int,
-    current_size: int,
-}
 
 CacheKey :: struct {
     filename: string,
     offset: u64,
+}
+
+BlockCache :: struct {
+	internal_cache:       lru.Cache(CacheKey, []byte),
+	current_memory_usage: int,
+	max_memory_usage:     int,
 }
 
 // In sstable_find, check cache before os.read()
@@ -161,9 +160,9 @@ db_open_with_options :: proc(path: string, opts: DBOptions) -> ^DB
 
 ---
 
-## ❌ Features You Already Have (Do NOT Implement)
+## ❌ Features Already Have in Codebase (Do NOT Implement)
 
-These are already in your codebase:
+These are already in the codebase:
 - ✅ MemTable with Skip List
 - ✅ Write-Ahead Log (WAL)
 - ✅ SSTable format with sparse indexing

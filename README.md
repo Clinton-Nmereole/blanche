@@ -76,6 +76,19 @@ Published in: Acta Informatica
 - **Compaction Integration:** Tombstones removed during merge when safe
 - **API:** `db_delete(db, key)` marks keys as deleted
 
+### ✅ Phase 9: Range finding
+- **Implementation:** Database iterators which give the ability to traverse keys being searched without loading entire data into Memory
+- **Purpose:** This is implemented in db_scan when the user wants keys in a specific range. 
+- **Benefits:** User wants a range of keys and db_scan gives the user and iterator that returns an iterator. This way we can give the user large amounts of data (example 20GB) without crashing due to out of memory error.
+
+### ✅ Phase 10: Block Caching
+- **Implementation:** Implemented CacheKey and Block cache which load 4MB of "hot" data into memory
+- **Purpose:** Keep frequently accessed data blocks in RAM to avoid disk I/O
+- **Integration:** Check and update cache in `sstable_find` which is subsequently used in `db_get`. It also has the ability to recognize TOMBSTONE values.
+- **Impact:**  10-100x speedup for repeated reads
+
+
+
 ## Technical Highlights
 
 ### Why This Matters
@@ -124,9 +137,7 @@ blanche/
 │   ├── data/              # Database files (.sst, .filter, .log, manifest.json)
 │   ├── test_data/         # Test database files
 │   └── blanche            # Compiled test executable
-├── constants/
 │   └── constants.odin     # Shared constants (levels, thresholds, etc.)
-├── tests/                 # Additional test files
 ├── phase_6_bloom_filters.md  # Historical implementation notes
 ├── OPTIMIZATIONS.md       # Future enhancement roadmap
 └── README.md
@@ -143,7 +154,7 @@ This project leverages Odin's systems programming strengths:
 
 ## Testing
 
-Comprehensive test suite in `main.odin` covering **12 phases with 85+ tests**:
+Comprehensive test suite in `main.odin` covering **12 phases with 90+ tests**:
 
 1. **MemTable Tests** - Sorted insertion, updates, deletion, clearing
 2. **WAL Tests** - Crash recovery simulation with multi-entry replay
@@ -152,7 +163,8 @@ Comprehensive test suite in `main.odin` covering **12 phases with 85+ tests**:
 5. **DB Operations** - CRUD operations (Create, Read, Update, Delete)
 6. **DELETE Operations** - Tombstone propagation through all layers
 7. **Flush Operations** - Automatic/manual flushing, threshold triggers
-8. **Compaction** - Multi-file merge, deduplication, version preservation
+8. **Compaction** - Multi-file merge, deduplication, version preservation/
+    - **Block Caching** - Block caching, faster reads for "hot" keys
 9. **Bloom Filters** - False positive rate, save/load persistence
 10. **Manifest** - State persistence, database restart scenarios
 11. **Iterator** - Sequential SSTable scans, ordering validation
@@ -207,12 +219,10 @@ Run tests: `cd src; odin build . -out:blanche; ./blanche`
 
 See `OPTIMIZATIONS.md` for detailed implementation guides. Key missing features:
 
-1. **Range Queries** (`db_scan`) - Infrastructure exists (manifest metadata, iterators)
-2. **Block Cache (LRU)** - 10-100x speedup for hot data
-3. **Compression** - Snappy/LZ4 for 2-5x space savings
-4. **Better Error Handling** - Proper error types and propagation
-5. **Statistics/Metrics** - Observability (reads/writes per second, cache hit rates)
-6. **Configurable Parameters** - Tunable thresholds via options struct
+1. **Compression** - Snappy/LZ4 for 2-5x space savings
+2. **Better Error Handling** - Proper error types and propagation
+3. **Statistics/Metrics** - Observability (reads/writes per second, cache hit rates)
+4. **Configurable Parameters** - Tunable thresholds via options struct
 
 ## Learning Resources
 
