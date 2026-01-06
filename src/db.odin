@@ -3,6 +3,7 @@ package blanche
 import "core:container/lru"
 import "core:encoding/endian"
 import "core:fmt"
+import "core:hash"
 import "core:mem"
 import "core:os"
 import "core:slice"
@@ -651,15 +652,6 @@ sstable_find :: proc(
 	start_search_offset: i64 = 0
 	current_position := i64(index_offset)
 
-	// Now we want to read each key from the index section of the form [key length] [key_data] [offset]
-	// Check for a suitable start position by comparing the key being searched with key data
-	// if the key is smaller, we will set our start_search_offset value equal to the offset value contained in our index block
-	// if we eventually find a larger key, we should stop and possibly set a value end_search_offset to that offset
-	// the reason I think this is a good idea is that if the we get a start_search_offset of say 500th entry, but our block 1
-	// contains 5000 records, we don't want to search the entire store of 4500 other entries until we get back to index block
-	// We want to get an end_search_offset that says we know  the key is less than the 1000th entry.
-	// This way we only read 500 entries before saying we didn't find the key rather than 4500 entries.
-
 	// Looping through index block up until the footer
 	for current_position < (file_size - 8) {
 		// Read the key length
@@ -728,26 +720,32 @@ sstable_find :: proc(
 	// Ok, Jump to the start_search_offset or the O and read till the end_search_offset
 	os.seek(file, start_search_offset, os.SEEK_SET)
 
-	// Interesting, but if the item being searched is larger than the largest index, end_search_offset will remain 0
-	// if we try to loop while curr < end_search_offset, we will have a situation like while 500 < 0 which means the search will fail.
-	// So we can do if statement that if end_search_offset < start_search_offset, then we search till the end of index block
-	// else we search from start_search_offset to end_search_offset. I'm not exactly sure the performance benefits but
-	// But does this even matter? if the end_search_offset is a value we only search the entire array block if the searched
-	// key is not in the database. If it is in the database we will find it in the index length window anyway.
-	// So end_search_offset only improves the worst case scenario, which is that the key is not in the database
-	// Example we have indexes "Apple", "Ball", "Box", "Cat", "Cube", "Date", ... "Monkey"... "Zebra" and we are looking for "Condo" but "Condo"
-	// is not in block 1, we will start from "Cat" and search till the end of block 1. However, with end_search_offset we can tell the user it is not
-	// in the database once we hit the position of "Cube", so we are faster at telling the user "not found".
-	// There is no difference however, if "Condo" is in the database/file
 
-	// Well just realized that end_search_offset is not needed because of the sorted nature of the database, if we are searching for a key and
-	// ever come across a key in the database larger than the key being searched for we can just stop the search because the key being searched for is
-	// not in the database. So forget the ramblings above.
+	// Read the length of the block (first 8 bytes)
+	block_len_buf: [8]byte
+	os.read(file, block_len_buf[:])
+	block_len, _ := endian.get_u64(block_len_buf[:], .Little)
 
-	// Read the full 4KB block
-	buffer := make([]byte, 4096)
+
+	//TODO: This memory is never freed, you NEED to fix this to avoid memory leaks later.
+
+	// Read the block data
+	buffer := make([]byte, block_len) // hmm... is this memory ever freed?
 	bytes_read, _ := os.read(file, buffer)
 	fmt.printf("  Read %d bytes from disk.\n", bytes_read)
+
+	// Read the last 4 bytes to get the checksum
+	checksum_buf: [4]byte
+	os.read(file, checksum_buf[:])
+	checksum, _ := endian.get_u32(checksum_buf[:], .Little)
+
+	// Calculate the checksum and compare it to read checksum
+	calc_checksum := hash.crc32(buffer)
+
+	if checksum != calc_checksum {
+		fmt.println("There is a corruption in the file, the checksum does not match")
+		return nil, false, false
+	}
 
 	// UPDATE CACHE 💾
 	// Save this block so we don't have to read it next time

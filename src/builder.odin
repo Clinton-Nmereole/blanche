@@ -2,6 +2,7 @@ package blanche
 
 import "core:encoding/endian"
 import "core:fmt"
+import "core:hash"
 import "core:os"
 
 
@@ -10,6 +11,7 @@ SSTableBuilder :: struct {
 	current_offset: u64,
 	index_list:     [dynamic]IndexEntry,
 	item_count:     i64,
+	block_buffer:   [dynamic]byte,
 }
 
 builder_init :: proc(filename: string) -> ^SSTableBuilder {
@@ -29,8 +31,30 @@ builder_init :: proc(filename: string) -> ^SSTableBuilder {
 	b.current_offset = 0
 	b.index_list = make([dynamic]IndexEntry)
 	b.item_count = 0
+	b.block_buffer = make([dynamic]byte)
 
 	return b
+
+}
+
+block_write :: proc(block: []byte, file: os.Handle) {
+
+	// Write the length of the block to the file
+	block_len_buf: [8]byte
+	endian.put_u64(block_len_buf[:], .Little, u64(len(block)))
+	os.write(file, block_len_buf[:])
+
+	//Calculate the checksum
+	checksum := hash.crc32(block)
+
+	// Write entire block to the file
+	os.write(file, block)
+
+	// Make checksum bytes and write it to the file
+	checksum_byte: [4]byte
+	endian.put_u32(checksum_byte[:], .Little, checksum)
+	os.write(file, checksum_byte[:])
+
 
 }
 
@@ -47,22 +71,31 @@ builder_add :: proc(b: ^SSTableBuilder, key, value: []byte) {
 	//first we write the key length
 	klen_byte: [8]byte
 	endian.put_u64(klen_byte[:], endian.Byte_Order.Little, u64(len(key)))
-	os.write(b.file, klen_byte[:])
-	b.current_offset += 8
+	append(&b.block_buffer, ..klen_byte[:])
 
 	// write the actual key
-	os.write(b.file, key)
-	b.current_offset += u64(len(key))
+	append(&b.block_buffer, ..key)
 
 	// write the value length
 	vlen_byte: [8]byte
 	endian.put_u64(vlen_byte[:], endian.Byte_Order.Little, u64(len(value)))
-	os.write(b.file, vlen_byte[:])
-	b.current_offset += 8
+	append(&b.block_buffer, ..vlen_byte[:])
 
 	// write the actual value
-	os.write(b.file, value)
-	b.current_offset += u64(len(value))
+	append(&b.block_buffer, ..value)
+
+	if len(b.block_buffer) >= 4096 {
+
+		// write block to disk when 4KiB is reached
+		block_write(b.block_buffer[:], b.file)
+
+		// push offet
+		b.current_offset += u64(len(b.block_buffer)) + 12
+
+		// clear block buffer for new block
+		clear(&b.block_buffer)
+
+	}
 
 	b.item_count += 1
 
@@ -70,6 +103,14 @@ builder_add :: proc(b: ^SSTableBuilder, key, value: []byte) {
 }
 
 builder_finish :: proc(b: ^SSTableBuilder) {
+
+	// Must write to file if the length of the block_buffer is not 0
+	if len(b.block_buffer) > 0 {
+		block_write(b.block_buffer[:], b.file)
+		b.current_offset += u64(len(b.block_buffer)) + 12
+	}
+
+
 	// Write Index Block
 
 	index_start := b.current_offset
