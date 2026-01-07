@@ -189,6 +189,11 @@ db_iterator_close :: proc(db_iter: ^DBIterator) {
 
 }
 
+// helper function to clean memory when evicting using lru.set
+on_block_evict :: proc(key: CacheKey, value: []byte, user_data: rawptr) {
+	delete(value)
+}
+
 // CONSTANT: When do we freeze and flush? (4MB)
 MEMTABLE_THRESHOLD :: 4 * MB
 
@@ -260,6 +265,7 @@ db_open :: proc(dir: string) -> ^DB {
 	db.block_cache = new(BlockCache)
 	db.block_cache.max_memory_usage = BLOCK_CACHE_SIZE
 	lru.init(&db.block_cache.internal_cache, 1024)
+	db.block_cache.internal_cache.on_remove = on_block_evict
 
 	// 5. Initialize WAL
 	wal_path := fmt.tprintf("%s/wal.log", dir)
@@ -622,7 +628,7 @@ sstable_find :: proc(
 	is_tombstone: bool,
 ) {
 	// DEBUG TRACE 🕵️‍♂️
-	fmt.printf("Checking file: %s for key: %s\n", filename, string(key))
+	//fmt.printf("Checking file: %s for key: %s\n", filename, string(key))
 
 	// First we open the file
 	file, err := os.open(filename, os.O_RDONLY)
@@ -672,7 +678,7 @@ sstable_find :: proc(
 		current_position += 8
 
 		// Debug the Index
-		fmt.printf("    Index Entry: %s -> Offset %d\n", string(key_buf), offset)
+		//fmt.printf("    Index Entry: %s -> Offset %d\n", string(key_buf), offset)
 
 		// Compare to find key
 		cmp := compare_keys(key_buf, key)
@@ -697,7 +703,7 @@ sstable_find :: proc(
 	cached_block, found_in_cache := lru.get(&db.block_cache.internal_cache, cache_key)
 
 	if found_in_cache {
-		fmt.println("  Cache Hit! ⚡")
+		//fmt.println("  Cache Hit! ⚡")
 		val, found := search_block(cached_block, key)
 		if found {
 			if val == nil {
@@ -715,7 +721,7 @@ sstable_find :: proc(
 
 
 	}
-	fmt.println("  Cache Miss. Reading Disk... 🐢")
+	//fmt.println("  Cache Miss. Reading Disk... 🐢")
 
 	// Ok, Jump to the start_search_offset or the O and read till the end_search_offset
 	os.seek(file, start_search_offset, os.SEEK_SET)
@@ -727,10 +733,8 @@ sstable_find :: proc(
 	block_len, _ := endian.get_u64(block_len_buf[:], .Little)
 
 
-	//TODO: This memory is never freed, you NEED to fix this to avoid memory leaks later.
-
 	// Read the block data
-	buffer := make([]byte, block_len) // hmm... is this memory ever freed?
+	buffer := make([]byte, block_len) // freed using on_block_evict()
 	bytes_read, _ := os.read(file, buffer)
 	fmt.printf("  Read %d bytes from disk.\n", bytes_read)
 
@@ -750,6 +754,7 @@ sstable_find :: proc(
 	// UPDATE CACHE 💾
 	// Save this block so we don't have to read it next time
 	lru.set(&db.block_cache.internal_cache, cache_key, buffer)
+
 
 	// Search the fresh buffer
 	val, found := search_block(buffer, key)
