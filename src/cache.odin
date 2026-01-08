@@ -70,7 +70,11 @@ search_block :: proc(block: []byte, key: []byte) -> (value: []byte, found: bool)
 		cursor += int(key_len) // Skip Key
 		val_len := read_u64(block, cursor) // Read Value Length
 		cursor += 8
-		cursor += int(val_len) // Skip Value
+		if val_len == TOMBSTONE {
+			// do nothing.
+		} else {
+			cursor += int(val_len) // Skip Value
+		}
 
 	}
 	return nil, false

@@ -418,7 +418,7 @@ sstable_flush :: proc(db: ^DB) {
 		fmt.printf("Error: %v\n", open_err)
 		return
 	}
-	defer os.close(file)
+	//defer os.close(file)
 
 	// get the firstkey
 	firstkey := slice.clone(db.memtable.head.next[0].key)
@@ -512,20 +512,25 @@ IndexEntry :: struct {
 
 // Returns the number of keys written
 sstable_write_file :: proc(file: os.Handle, mt: ^Memtable) -> int {
+	builder := new(SSTableBuilder)
+	builder.file = file
+	builder.block_buffer = make([dynamic]byte)
+	builder.index_list = make([dynamic]IndexEntry)
 
 	counter := 0 // This the value we are returning (number of keys)
 
-	current_offset: u64 = 0 // This tracks how many bytes we have written
+	//current_offset: u64 = 0 // This tracks how many bytes we have written
 
 	// we need a dynamic array to hold our index entries (the IndexEntry struct)
-	index_list := make([dynamic]IndexEntry)
-	defer delete(index_list) // Clean up RAM after function run
+	//index_list := make([dynamic]IndexEntry)
+	//defer delete(index_list) // Clean up RAM after function run
 
 	// <-----BLOCK 1----->
 	//we want to write from the lowest level memtable (which is a skip list) until there are no more nodes left to write from
 	current_node := mt.head.next[0]
 
 	for current_node != nil {
+		/*
 		if counter % 100 == 0 { 	// add to the index list every hundred key-value pairs
 			// Make a copy of key, because key might get freed or disappear
 			key_copy := make([]byte, len(current_node.key))
@@ -534,7 +539,9 @@ sstable_write_file :: proc(file: os.Handle, mt: ^Memtable) -> int {
 
 
 		}
+        */
 
+		/*
 		// Ok, now we actually write to sst file in the format [key length] [key] [value length] [value]
 		// Write key length
 		key_length_bytes: [8]byte
@@ -568,12 +575,21 @@ sstable_write_file :: proc(file: os.Handle, mt: ^Memtable) -> int {
 			os.write(file, current_node.value)
 			current_offset += u64(len(current_node.value))
 		}
+        */
+
+		// We add to the builder instead
+		builder_add(builder, current_node.key, current_node.value)
 
 		current_node = current_node.next[0]
 		counter += 1
 
 
 	}
+
+	// Write to the file using builder_finish
+	builder_finish(builder)
+
+	/*
 
 	// <-----BLOCK 2----->
 
@@ -611,6 +627,7 @@ sstable_write_file :: proc(file: os.Handle, mt: ^Memtable) -> int {
 
 	// Force disk write
 	os.flush(file) // Use flush here to be safe since this is a permanent file
+    */
 
 
 	return counter

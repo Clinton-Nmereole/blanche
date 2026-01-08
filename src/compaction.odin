@@ -15,12 +15,53 @@ import "core:time"
 SSTableIterator :: struct {
 	file:          os.Handle,
 	file_size:     i64,
+	valid:         bool,
+
+	// Block State 
+	block_buffer:  []byte, // Holds the current 4KB block of data
+	block_cursor:  int, // Where are we inside this buffer?
+
+	// rest
 	curr_position: i64,
 	end_position:  i64,
-	valid:         bool,
 	key:           []byte,
 	value:         []byte,
 	is_tombstone:  bool,
+}
+
+load_next_block :: proc(it: ^SSTableIterator) -> bool {
+
+	// Check if we are at the end of the file
+	if it.curr_position >= it.end_position {
+		it.valid = false
+		return false
+	}
+
+	// Read block length
+	block_len_buf: [8]byte
+	os.read(it.file, block_len_buf[:])
+	block_size, _ := endian.get_u64(block_len_buf[:], .Little)
+	it.curr_position += 8
+
+
+	//Allocate Buffer & Read Data
+	if it.block_buffer != nil {
+		delete(it.block_buffer)
+	}
+	it.block_buffer = make([]byte, block_size)
+	os.read(it.file, it.block_buffer)
+	it.curr_position += i64(block_size)
+
+	// Read checksum
+	checksum_buf: [4]byte
+	os.read(it.file, checksum_buf[:])
+	it.curr_position += 4
+	//os.seek(it.file, 4, os.SEEK_CUR)
+
+	//  Reset Cursor
+	it.block_cursor = 0
+	return true
+
 }
 
 sstable_iterator_init :: proc(filename: string) -> ^SSTableIterator {
@@ -66,45 +107,53 @@ sstable_iterator_next :: proc(it: ^SSTableIterator) {
 	// DO NOT read the entire file, we then update the curr_position
 	// the file is open from initializing the iterator
 
+	// Check if we are at the end of the current block
+	if it.block_cursor == len(it.block_buffer) || it.block_buffer == nil {
+		not_end := load_next_block(it)
+
+		// if load_next_block() returns false then we have read the entire file
+		if !not_end {
+			return
+		}
+
+	}
+
 	// Clean the old key and old value
 	if it.key != nil {delete(it.key)}
 	if it.value != nil {delete(it.value)}
 
-	// Check if we hit the end of the data block
-	if it.curr_position >= it.end_position {
-		it.valid = false
-		return
-	}
 
 	// Read the key length
-	klen_buf: [8]byte
-	os.read(it.file, klen_buf[:])
-	klen, _ := endian.get_u64(klen_buf[:], endian.Byte_Order.Little)
-	it.curr_position += 8
+	klen_buf := it.block_buffer[it.block_cursor:it.block_cursor + 8]
+	//os.read(it.file, klen_buf[:])
+	klen, _ := endian.get_u64(klen_buf, .Little)
+	it.block_cursor += 8
 
 	// Read the key
 	it.key = make([]byte, klen)
-	os.read(it.file, it.key)
-	it.curr_position += i64(klen)
+	copy(it.key, it.block_buffer[it.block_cursor:it.block_cursor + int(klen)])
+	//os.read(it.file, it.key)
+	it.block_cursor += int(klen)
 
 	// Read the value length
-	vlen_buf: [8]byte
-	os.read(it.file, vlen_buf[:])
-	vlen, _ := endian.get_u64(vlen_buf[:], endian.Byte_Order.Little)
-	it.curr_position += 8
+	vlen_buf := it.block_buffer[it.block_cursor:it.block_cursor + 8]
+	//os.read(it.file, vlen_buf[:])
+	vlen, _ := endian.get_u64(vlen_buf, .Little)
+	it.block_cursor += 8
 
 	// Read the value
 	if u64(vlen) == TOMBSTONE {
 		it.value = nil
 		it.is_tombstone = true
-		os.seek(it.file, i64(vlen), os.SEEK_CUR)
-		it.curr_position += i64(vlen)
+		//os.seek(it.file, 0, os.SEEK_CUR)
+		//it.curr_position += i64(vlen)
 
 	} else {
 		it.value = make([]byte, vlen)
 		it.is_tombstone = false
-		os.read(it.file, it.value)
-		it.curr_position += i64(vlen)
+		//os.read(it.file, it.value)
+		copy(it.value, it.block_buffer[it.block_cursor:it.block_cursor + int(vlen)])
+		it.block_cursor += int(vlen)
 
 	}
 
@@ -386,11 +435,13 @@ db_compact :: proc(files: [dynamic]SSTableHandle, data_dir: string) -> SSTableHa
 			if it.valid && compare_keys(it.key, min_key) == 0 { 	// if they are valid and have the smallest key
 
 				if !found_winner { 	// Check if we have found the winner, if not, feed it to the builder.
+					/*
 					if it.is_tombstone {
 						sstable_iterator_next(it)
 						found_winner = true
 						continue
 					}
+                    */
 					builder_add(builder, it.key, it.value) // iterators is sorted, so the first it which is a winner is the most recent
 
 					// Always update the last_key (copy it)

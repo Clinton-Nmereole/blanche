@@ -78,11 +78,18 @@ builder_add :: proc(b: ^SSTableBuilder, key, value: []byte) {
 
 	// write the value length
 	vlen_byte: [8]byte
-	endian.put_u64(vlen_byte[:], endian.Byte_Order.Little, u64(len(value)))
-	append(&b.block_buffer, ..vlen_byte[:])
+	if value == nil {
+		endian.put_u64(vlen_byte[:], endian.Byte_Order.Little, TOMBSTONE)
+		append(&b.block_buffer, ..vlen_byte[:])
 
-	// write the actual value
-	append(&b.block_buffer, ..value)
+	} else {
+		endian.put_u64(vlen_byte[:], endian.Byte_Order.Little, u64(len(value)))
+		append(&b.block_buffer, ..vlen_byte[:])
+
+		// write the actual value
+		append(&b.block_buffer, ..value)
+	}
+
 
 	if len(b.block_buffer) >= 4096 {
 
