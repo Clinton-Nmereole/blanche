@@ -72,8 +72,37 @@ random_level :: proc() -> int {
 }
 
 // Helper: Returns -1 if a < b, 0 if equal, 1 if a > b
+// Implements "natural sort" so that "K:2" < "K:10"
 compare_keys :: proc(a, b: []byte) -> int {
-	return strings.compare(string(a), string(b))
+	sa := string(a)
+	sb := string(b)
+
+	i, j := 0, 0
+	for i < len(sa) && j < len(sb) {
+		if sa[i] >= '0' && sa[i] <= '9' && sb[j] >= '0' && sb[j] <= '9' {
+			// Parse numbers
+			var_a, var_b: u64 = 0, 0
+			for i < len(sa) && sa[i] >= '0' && sa[i] <= '9' {
+				var_a = var_a * 10 + u64(sa[i] - '0')
+				i += 1
+			}
+			for j < len(sb) && sb[j] >= '0' && sb[j] <= '9' {
+				var_b = var_b * 10 + u64(sb[j] - '0')
+				j += 1
+			}
+			if var_a < var_b do return -1
+			if var_a > var_b do return 1
+		} else {
+			if sa[i] < sb[j] do return -1
+			if sa[i] > sb[j] do return 1
+			i += 1
+			j += 1
+		}
+	}
+
+	if len(sa) < len(sb) do return -1
+	if len(sa) > len(sb) do return 1
+	return 0
 }
 
 // Insert into the memtable

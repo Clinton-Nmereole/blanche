@@ -266,7 +266,13 @@ compact_level_0 :: proc(db: ^DB) {
 	// A. Remove l0_file from Level 0
 	// B. Remove overlaps from Level 1
 	// C. Add new_handle to Level 1
-	ordered_remove(&db.levels[0], 0)
+	for i := 0; i < len(db.levels[0]); i += 1 {
+		if db.levels[0][i].filename == l0_file.filename {
+			ordered_remove(&db.levels[0], i)
+			break
+		}
+	}
+
 
 	new_level_1 := make([dynamic]SSTableHandle)
 	for item in db.levels[1] {
@@ -289,6 +295,13 @@ compact_level_0 :: proc(db: ^DB) {
 	})
 	db.levels[1] = new_level_1
 	manifest_save(db)
+
+	for old_file in compaction_list {
+		os.remove(old_file.filename)
+		// Reconstruct filter name to delete it too
+		filter_name := fmt.tprintf("%s.filter", strings.trim_suffix(old_file.filename, ".sst"))
+		os.remove(filter_name)
+	}
 
 
 }
@@ -331,7 +344,13 @@ compact_level_n :: proc(db: ^DB, level_idx: int) {
 	// A. Remove l0_file from Level n
 	// B. Remove overlaps from Level n + 1
 	// C. Add new_handle to Level n + 1
-	ordered_remove(&db.levels[level_idx], 0)
+	for i := 0; i < len(db.levels[level_idx]); i += 1 {
+		if db.levels[level_idx][i].filename == target_file.filename {
+			ordered_remove(&db.levels[level_idx], i)
+			break
+		}
+	}
+	//ordered_remove(&db.levels[level_idx], 0)
 
 	new_level_n_plus := make([dynamic]SSTableHandle)
 
@@ -355,6 +374,13 @@ compact_level_n :: proc(db: ^DB, level_idx: int) {
 	})
 	db.levels[next_level_idx] = new_level_n_plus
 	manifest_save(db)
+
+	for old_file in compaction_list {
+		os.remove(old_file.filename)
+		// Reconstruct filter name to delete it too
+		filter_name := fmt.tprintf("%s.filter", strings.trim_suffix(old_file.filename, ".sst"))
+		os.remove(filter_name)
+	}
 
 
 }
@@ -475,6 +501,7 @@ db_compact :: proc(files: [dynamic]SSTableHandle, data_dir: string) -> SSTableHa
 		sstable_iterator_close(it)
 	}
 
+	/*
 	for ssthandle in files {
 		old_filter_name := fmt.tprintf(
 			"%s.filter",
@@ -483,6 +510,7 @@ db_compact :: proc(files: [dynamic]SSTableHandle, data_dir: string) -> SSTableHa
 		os.remove(ssthandle.filename)
 		os.remove(old_filter_name)
 	}
+    */
 
 	//Rename the Temp File
 	// We give it a new timestamp name so it looks like a normal SSTable

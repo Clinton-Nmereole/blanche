@@ -60,7 +60,7 @@ block_write :: proc(block: []byte, file: os.Handle) {
 
 builder_add :: proc(b: ^SSTableBuilder, key, value: []byte) {
 
-	if b.item_count % SPARSE_FACTOR == 0 {
+	if len(b.block_buffer) == 0 {
 		key_copy := make([]byte, len(key))
 		copy(key_copy, key)
 		append(&b.index_list, IndexEntry{key = key_copy, offset = b.current_offset})
@@ -92,12 +92,13 @@ builder_add :: proc(b: ^SSTableBuilder, key, value: []byte) {
 
 
 	if len(b.block_buffer) >= 4096 {
+		block_size_on_disk := u64(len(b.block_buffer)) + 12 // 8 bytes len + 4 bytes checksum
 
 		// write block to disk when 4KiB is reached
 		block_write(b.block_buffer[:], b.file)
 
 		// push offet
-		b.current_offset += u64(len(b.block_buffer)) + 12
+		b.current_offset += block_size_on_disk
 
 		// clear block buffer for new block
 		clear(&b.block_buffer)
@@ -113,8 +114,9 @@ builder_finish :: proc(b: ^SSTableBuilder) {
 
 	// Must write to file if the length of the block_buffer is not 0
 	if len(b.block_buffer) > 0 {
+		block_size_on_disk := u64(len(b.block_buffer)) + 12
 		block_write(b.block_buffer[:], b.file)
-		b.current_offset += u64(len(b.block_buffer)) + 12
+		b.current_offset += block_size_on_disk
 	}
 
 

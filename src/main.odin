@@ -942,6 +942,74 @@ test_stress :: proc() {
 	assert(true, "Stress: Mixed operations completed successfully")
 }
 
+test_benchmark_throughput :: proc() {
+	fmt.println()
+	fmt.println("----------------------------------------------------------------------")
+	fmt.println("PHASE 13: THROUGHPUT BENCHMARK (500k Keys) 🚀")
+	fmt.println("----------------------------------------------------------------------")
+
+	cleanup_test_data()
+	db := db_open("test_data")
+	defer db_close(db)
+
+	count := 500000
+
+	// --- 1. WRITE TEST ---
+	fmt.printf("  📝 Writing %d keys...\n", count)
+	start_write := time.now()
+
+	for i := 0; i < count; i += 1 {
+		// Use simple, short keys to save RAM, but enough to be unique
+		k := transmute([]byte)fmt.tprintf("K:%d", i)
+		v := transmute([]byte)fmt.tprintf("V:%d", i)
+		db_put(db, k, v)
+
+		// Optional: Print progress every 50k
+		if i % 50000 == 0 && i > 0 {
+			fmt.printf("     ...inserted %d\n", i)
+		}
+	}
+
+	duration_write := time.diff(start_write, time.now())
+	seconds_write := time.duration_seconds(duration_write)
+	write_ops := f64(count) / seconds_write
+
+	fmt.printf("  ✅ Write Complete in %v\n", duration_write)
+	fmt.printf("  📊 WRITE SPEED: %.2f Ops/Sec\n", write_ops)
+
+
+	// --- 2. READ TEST ---
+	fmt.printf("\n  📖 Reading %d keys...\n", count)
+	start_read := time.now()
+
+	found_count := 0
+	missed_count := 0
+	for i := 0; i < count; i += 1 {
+		k := transmute([]byte)fmt.tprintf("K:%d", i)
+		_, found := db_get(db, k)
+		if found {
+			found_count += 1
+			// Optional: Print progress every 50k
+			if i % 50000 == 0 && i > 0 {
+				fmt.printf("     ...found %d\n", i)
+			}
+		} else {
+			missed_count += 1
+			// 🔍 DIAGNOSTIC: Print the first 10 missing keys
+			if missed_count <= 10 {
+				fmt.printf("    ❌ MISSING: %s\n", string(k))
+			}
+		}
+	}
+
+	duration_read := time.diff(start_read, time.now())
+	seconds_read := time.duration_seconds(duration_read)
+	read_ops := f64(count) / seconds_read
+
+	fmt.printf("  ✅ Read Complete in %v (Found: %d/%d)\n", duration_read, found_count, count)
+	fmt.printf("  📊 READ SPEED:  %.2f Ops/Sec\n", read_ops)
+}
+
 // ============================================================================
 // MAIN TEST RUNNER
 // ============================================================================
@@ -993,6 +1061,9 @@ main :: proc() {
 
 	// Phase 12: Performance & Reliability
 	test_stress()
+
+	// Phase 13: Throughput Benchmark
+	test_benchmark_throughput()
 
 	duration := time.diff(start_time, time.now())
 

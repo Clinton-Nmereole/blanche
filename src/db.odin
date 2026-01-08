@@ -26,6 +26,7 @@ DB :: struct {
 	levels:         [dynamic][dynamic]SSTableHandle,
 	mutex:          sync.Mutex,
 	block_cache:    ^BlockCache,
+	flush_counter:  u64,
 }
 
 DBIterator :: struct {
@@ -46,7 +47,7 @@ db_iterator_init :: proc(db: ^DB, start_key, end_key: []byte) -> ^DBIterator {
 	// initialize memtable iterator and set it to DBIterator's mem_iter field
 	db_iter.mem_iter = memtable_iterator_init(db.memtable)
 
-	// initialize an SSTableIterator for every single file in the db (loop through levels) 
+	// initialize an SSTableIterator for every single file in the db (loop through levels)
 	//or maybe we can only loop through files in a range if the range is passed.
 
 	// So go through each level
@@ -140,7 +141,7 @@ db_iterator_next :: proc(db_iter: ^DBIterator) {
 				if !found_winner {
 					// first we handle the tombstone condition.
 					if it.is_tombstone {
-						// if the key is found but has been deleted we do not want to return it to the user we do nothing and push 
+						// if the key is found but has been deleted we do not want to return it to the user we do nothing and push
 						// the iterator forward. WE DO NOT SET VALUE.
 						found_winner = true
 						sstable_iterator_next(it)
@@ -311,6 +312,9 @@ db_put :: proc(db: ^DB, key, value: []byte) {
 }
 
 db_get :: proc(db: ^DB, key: []byte) -> ([]byte, bool) {
+	// This ensures no one deletes files while we are looking at them!
+	sync.mutex_lock(&db.mutex)
+	defer sync.mutex_unlock(&db.mutex)
 	//this is the part where the bloom filter works best.
 	// Check if the bloom filter does not contain the key
 
@@ -404,8 +408,9 @@ db_scan :: proc(db: ^DB, start_key, end_key: []byte) -> ^DBIterator {
 
 sstable_flush :: proc(db: ^DB) {
 	timestamp := time.to_unix_nanoseconds(time.now())
-	filename := fmt.tprintf("%s/%d.sst", db.data_directory, timestamp)
-	filtername := fmt.tprintf("%s/%d.filter", db.data_directory, timestamp)
+	filename := fmt.tprintf("%s/%d_%d.sst", db.data_directory, timestamp, db.flush_counter)
+	filtername := fmt.tprintf("%s/%d_%d.filter", db.data_directory, timestamp, db.flush_counter)
+	db.flush_counter += 1
 
 	filter := bloomfilter_init(db.memtable.count, 0.01)
 
@@ -459,7 +464,7 @@ sstable_flush :: proc(db: ^DB) {
 	// 3. WRITE THE DATA (The heavy lifting)
 	// We will implement this detailed binary encoding in a moment.
 	keys_count := sstable_write_file(file, db.memtable)
-	fmt.printf("Flushed SSTable: %s\n", filename)
+	// fmt.printf("Flushed SSTable: %s\n", filename)
 
 	// save the filter to file as well
 
@@ -480,6 +485,9 @@ sstable_flush :: proc(db: ^DB) {
 
 	}
 	db.wal = new_wal
+
+	// 5. Ensure persistence
+	manifest_save(db)
 
 }
 
@@ -667,7 +675,7 @@ sstable_find :: proc(
 	footer_buffer: [8]byte
 	os.read(file, footer_buffer[:])
 	index_offset, _ := endian.get_u64(footer_buffer[:], endian.Byte_Order.Little)
-	fmt.printf("  Index starts at: %d\n", index_offset)
+	// fmt.printf("  Index starts at: %d\n", index_offset)
 
 	// Seek to the index offset
 	os.seek(file, i64(index_offset), os.SEEK_SET)
@@ -752,8 +760,16 @@ sstable_find :: proc(
 
 	// Read the block data
 	buffer := make([]byte, block_len) // freed using on_block_evict()
-	bytes_read, _ := os.read(file, buffer)
-	fmt.printf("  Read %d bytes from disk.\n", bytes_read)
+
+	bytes_read := 0
+	for bytes_read < int(block_len) {
+		n, err := os.read(file, buffer[bytes_read:])
+		if err != os.ERROR_NONE || n == 0 {
+			break
+		}
+		bytes_read += n
+	}
+	// fmt.printf("  Read %d bytes from disk.\n", bytes_read)
 
 	// Read the last 4 bytes to get the checksum
 	checksum_buf: [4]byte
@@ -777,13 +793,13 @@ sstable_find :: proc(
 	val, found := search_block(buffer, key)
 
 	if found {
-		fmt.println("  FOUND in Disk Block! ✅")
+		// fmt.println("  FOUND in Disk Block! ✅")
 		if val == nil {
 			return nil, true, true
 		}
 		return val, true, false
 	}
-	fmt.println("  NOT FOUND in Disk Block. ❌")
+	// fmt.println("  NOT FOUND in Disk Block. ❌")
 
 	return nil, false, false
 
