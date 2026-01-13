@@ -133,6 +133,39 @@ main :: proc() {
 					}
 
 				}
+			} else if input_list[0] == "DELETE" {
+				if len(input_list) < 2 {
+					fmt.println(
+						"Insufficient arguments for the DELETE operation, you need 1 argument.",
+					)
+					continue
+				} else if len(input_list) > 2 {
+					fmt.println("You can only delete a single key at a time.")
+				} else {
+					key := transmute([]byte)input_list[1]
+					db_delete(db, key)
+					fmt.printf("The key '%s' has been deleted from the database.\n", key)
+				}
+			} else if input_list[0] == "SCAN" {
+				if len(input_list) < 3 {
+					fmt.println(
+						"Insufficient arguments for the SCAN operation, you need 2 arguments.",
+					)
+					continue
+				} else if len(input_list) > 3 {
+					fmt.println(
+						"You have too many arguments. The SCAN operation takes a start key and an end key",
+					)
+				} else {
+					start_key := transmute([]byte)input_list[1]
+					end_key := transmute([]byte)input_list[2]
+					db_iter := db_scan(db, start_key, end_key)
+					defer db_iterator_close(db_iter)
+					for db_iter.valid {
+						fmt.printf("%s : %s\n", db_iter.key, db_iter.value)
+						db_iterator_next(db_iter)
+					}
+				}
 			}
 
 		}
