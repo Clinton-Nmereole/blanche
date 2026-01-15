@@ -2,6 +2,7 @@ package blanche
 
 import "core:bufio"
 import "core:fmt"
+import "core:net"
 import "core:os"
 import "core:slice"
 import "core:strings"
@@ -73,6 +74,8 @@ main :: proc() {
 
 		reader: bufio.Reader
 		bufio.reader_init(&reader, os.stream_from_handle(os.stdin))
+		endpoint, _ := net.parse_endpoint("127.0.0.1:8080")
+		socket, _ := net.listen_tcp(endpoint)
 		fmt.println("==== BLANCHE Database has been launched ====")
 
 		for {
