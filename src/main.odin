@@ -76,6 +76,7 @@ main :: proc() {
 		bufio.reader_init(&reader, os.stream_from_handle(os.stdin))
 		endpoint, _ := net.parse_endpoint("127.0.0.1:8080")
 		socket, _ := net.listen_tcp(endpoint)
+		client, source, _ := net.accept_tcp(socket)
 		fmt.println("==== BLANCHE Database has been launched ====")
 
 		for {
