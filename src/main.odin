@@ -72,18 +72,37 @@ main :: proc() {
 		db := db_open("test_data")
 		defer db_close(db)
 
-		reader: bufio.Reader
-		bufio.reader_init(&reader, os.stream_from_handle(os.stdin))
+
 		endpoint, _ := net.parse_endpoint("127.0.0.1:8080")
 		socket, _ := net.listen_tcp(endpoint)
 		client, source, _ := net.accept_tcp(socket)
+		fmt.printf("Client connected from: %v\n", source)
+		reader: bufio.Reader
+		bufio.reader_init(&reader, os.stream_from_handle(os.stdin))
 		fmt.println("==== BLANCHE Database has been launched ====")
+		buf: [4096]byte
 
 		for {
+			//Read from the network
+			// 'bytes_read' tells us how full the bucket got
+			bytes_read, err := net.recv_tcp(client, buf[:])
+
+			// Handle errors or disconnection
+			if err != nil || bytes_read == 0 {
+				fmt.println("Client disconnected.")
+				break
+			}
+
+			// Convert ONLY the data we received into a string
+			// We slice up to 'bytes_read' so we don't read empty zeros from the rest of the buffer
+			input := string(buf[:bytes_read])
+
+			// ... The rest of your existing logic (trim_space, split, etc.) works exactly the same!
+			input = strings.trim_space(input)
 
 			fmt.print(">> ")
-			input, err := bufio.reader_read_string(&reader, '\n')
-			input = strings.trim_space(input)
+			//input, err := bufio.reader_read_string(&reader, '\n')
+			//input = strings.trim_space(input)
 			input_list := strings.split(input, " ")
 			defer delete(input_list)
 			if len(input_list) == 0 {
