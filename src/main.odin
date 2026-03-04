@@ -113,79 +113,97 @@ main :: proc() {
 				break
 			} else if input_list[0] == "SET" {
 				if len(input_list) < 3 {
-					fmt.println(
+					msg := fmt.tprintln(
 						"Insufficient arguments for the SET operation, you need 2 arguments.",
 					)
+					net.send_tcp(client, transmute([]byte)msg)
 					continue
 				} else {
 					key := transmute([]byte)input_list[1]
 					value := transmute([]byte)input_list[2]
 					db_put(db, key, value)
-					fmt.printf(
-						"The key '%s' and the value '%s' have been added to the database\n",
+					msg := fmt.tprintf(
+						"The key '%s' with the value '%s' have been added to the database\n",
 						key,
 						value,
 					)
+					net.send_tcp(client, transmute([]byte)msg)
 				}
 
 			} else if input_list[0] == "GET" {
 				if len(input_list) < 2 {
-					fmt.println(
+					msg := fmt.tprintln(
 						"Insufficient arguments for the GET operation, you need 1 argument.",
 					)
+					net.send_tcp(client, transmute([]byte)msg)
 					continue
 				} else if len(input_list) > 2 {
-					fmt.println(
+					msg := fmt.tprintln(
 						"You can only get a single key at a time. To get a range of keys use SCAN command",
 					)
-
+					net.send_tcp(client, transmute([]byte)msg)
 				} else {
 					key := transmute([]byte)input_list[1]
 					found_value, found := db_get(db, key)
 					if found {
-						fmt.printf(
+						msg := fmt.tprintf(
 							"The key '%s' was found in the database and its corresponding value is '%s'\n",
 							key,
 							found_value,
 						)
+
+						net.send_tcp(client, transmute([]byte)msg)
 					} else {
-						fmt.printf(
+						msg := fmt.tprintf(
 							"The key '%s' does not exist in the database, you can add it with SET command.\n",
 							key,
 						)
+
+						net.send_tcp(client, transmute([]byte)msg)
 					}
 
 				}
 			} else if input_list[0] == "DELETE" {
 				if len(input_list) < 2 {
-					fmt.println(
+					msg := fmt.tprintln(
 						"Insufficient arguments for the DELETE operation, you need 1 argument.",
 					)
+
+					net.send_tcp(client, transmute([]byte)msg)
 					continue
 				} else if len(input_list) > 2 {
-					fmt.println("You can only delete a single key at a time.")
+					msg := fmt.tprintln("You can only delete a single key at a time.")
+					net.send_tcp(client, transmute([]byte)msg)
 				} else {
 					key := transmute([]byte)input_list[1]
 					db_delete(db, key)
-					fmt.printf("The key '%s' has been deleted from the database.\n", key)
+					msg := fmt.tprintf("The key '%s' has been deleted from the database.\n", key)
+
+					net.send_tcp(client, transmute([]byte)msg)
 				}
 			} else if input_list[0] == "SCAN" {
 				if len(input_list) < 3 {
-					fmt.println(
+					msg := fmt.tprintf(
 						"Insufficient arguments for the SCAN operation, you need 2 arguments.",
 					)
+					net.send_tcp(client, transmute([]byte)msg)
 					continue
 				} else if len(input_list) > 3 {
-					fmt.println(
+					msg := fmt.tprintln(
 						"You have too many arguments. The SCAN operation takes a start key and an end key",
 					)
+
+					net.send_tcp(client, transmute([]byte)msg)
+
 				} else {
 					start_key := transmute([]byte)input_list[1]
 					end_key := transmute([]byte)input_list[2]
 					db_iter := db_scan(db, start_key, end_key)
 					defer db_iterator_close(db_iter)
 					for db_iter.valid {
-						fmt.printf("%s : %s\n", db_iter.key, db_iter.value)
+						msg := fmt.tprintf("%s : %s\n", db_iter.key, db_iter.value)
+
+						net.send_tcp(client, transmute([]byte)msg)
 						db_iterator_next(db_iter)
 					}
 				}
