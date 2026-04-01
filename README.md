@@ -2,6 +2,10 @@
 
 A high-performance Log-Structured Merge (LSM) Tree key-value store implementation in Odin, inspired by production systems like LevelDB and RocksDB.
 
+## NOTICE:
+
+As of 03-2026, there have been breaking changes made to Odin's core:os package. I do not care or have time to keep up with potential constant updates or breaking changes which I understand come with using a language that is not yet 1.0. No further updates will be made to this project for now.
+
 ## What is This?
 
 Blanche is a persistent key-value database that solves a fundamental computer science problem: **how do you build fast, reliable storage that survives crashes?**

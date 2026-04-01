@@ -8,6 +8,11 @@ import "core:slice"
 import "core:strings"
 import "core:time"
 
+handle_client :: proc(client: net.TCP_Socket, db: ^DB) {
+	fmt.println("Waiter assigned")
+
+}
+
 main :: proc() {
 	if len(os.args) > 1 && os.args[1] == "test" {
 		fmt.println("======================================================================")
@@ -78,7 +83,7 @@ main :: proc() {
 		client, source, _ := net.accept_tcp(socket)
 		fmt.printf("Client connected from: %v\n", source)
 		reader: bufio.Reader
-		bufio.reader_init(&reader, os.stream_from_handle(os.stdin))
+
 		fmt.println("==== BLANCHE Database has been launched ====")
 		buf: [4096]byte
 
