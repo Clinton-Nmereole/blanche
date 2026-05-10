@@ -3,7 +3,7 @@ package blanche
 import "core:bufio"
 import "core:fmt"
 import "core:net"
-import "core:os"
+import "core:os/old"
 import "core:slice"
 import "core:strings"
 import "core:time"
@@ -14,7 +14,7 @@ handle_client :: proc(client: net.TCP_Socket, db: ^DB) {
 }
 
 main :: proc() {
-	if len(os.args) > 1 && os.args[1] == "test" {
+	if len(old.args) > 1 && old.args[1] == "test" {
 		fmt.println("======================================================================")
 		fmt.println("BLANCHE LSM-TREE DATABASE - COMPREHENSIVE TEST SUITE")
 		fmt.println("======================================================================")
@@ -99,7 +99,7 @@ main :: proc() {
 			}
 
 			// Convert ONLY the data we received into a string
-			// We slice up to 'bytes_read' so we don't read empty zeros from the rest of the buffer
+			// We slice up to 'bytes_read' so we don't read empty zerold.from the rest of the buffer
 			input := string(buf[:bytes_read])
 
 			// ... The rest of your existing logic (trim_space, split, etc.) works exactly the same!

@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "skills": {
+    "pi-cli-workspace": {
+      "source": "romiluz13/pi-agent-skills",
+      "sourceType": "github",
+      "skillPath": "pi-skills/pi-cli-workspace/SKILL.md",
+      "computedHash": "54933f9507a54d38c2ef5bf4dde21f5fa9d96f1f2b1c0f31deeff400b3eb3426"
+    },
+    "pi-customization": {
+      "source": "romiluz13/pi-agent-skills",
+      "sourceType": "github",
+      "skillPath": "pi-skills/pi-customization/SKILL.md",
+      "computedHash": "b946ed922e3eff7e84d03445f49a022f2b6f31ca1f89b581f1106f620303c5d2"
+    },
+    "pi-extension-authoring": {
+      "source": "romiluz13/pi-agent-skills",
+      "sourceType": "github",
+      "skillPath": "pi-skills/pi-extension-authoring/SKILL.md",
+      "computedHash": "dbb86f8a9e664027bcbb2a2293745e124d36c38a7fcc8273353b19b1a583b6af"
+    },
+    "pi-package-authoring": {
+      "source": "romiluz13/pi-agent-skills",
+      "sourceType": "github",
+      "skillPath": "pi-skills/pi-package-authoring/SKILL.md",
+      "computedHash": "43cf50ed79e2c94282553150e06170e5fc04bf12528916173970a9b0d40d53ef"
+    },
+    "pi-rpc-sdk": {
+      "source": "romiluz13/pi-agent-skills",
+      "sourceType": "github",
+      "skillPath": "pi-skills/pi-rpc-sdk/SKILL.md",
+      "computedHash": "d773a6738409ad21e027669e43681a268cb5fea98822a81ca814b3beae3712b5"
+    }
+  }
+}
