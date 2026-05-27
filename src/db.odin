@@ -37,12 +37,16 @@ DBIterator :: struct {
 	key:       []byte,
 	value:     []byte,
 	end_key:   []byte,
+	key_buf:   [dynamic]byte,
+	value_buf: [dynamic]byte,
 }
 
 db_iterator_init :: proc(db: ^DB, start_key, end_key: []byte) -> ^DBIterator {
 
 	// create new db iterator struct
 	db_iter := new(DBIterator)
+	db_iter.key_buf = make([dynamic]byte)
+	db_iter.value_buf = make([dynamic]byte)
 
 	// initialize memtable iterator and set it to DBIterator's mem_iter field
 	db_iter.mem_iter = memtable_iterator_init(db.memtable)
@@ -85,14 +89,10 @@ db_iterator_next :: proc(db_iter: ^DBIterator) {
 
 	for {
 		// So we are going to first free old memory from the previous call
-		if db_iter.key != nil {
-			delete(db_iter.key)
-			db_iter.key = nil
-		}
-		if db_iter.value != nil {
-			delete(db_iter.value)
-			db_iter.value = nil
-		}
+		clear(&db_iter.key_buf)
+		clear(&db_iter.value_buf)
+		db_iter.key = nil
+		db_iter.value = nil
 
 		// next we are going to find the minimum key. To do this we will look at all iterators to find the min_key
 		// since the memtable is sorted, we know that the minimum key from a memtable is the first key
@@ -127,10 +127,11 @@ db_iterator_next :: proc(db_iter: ^DBIterator) {
 		if db_iter.mem_iter.node != nil && compare_keys(min_key, db_iter.mem_iter.node.key) == 0 {
 			found_winner = true
 			if db_iter.mem_iter.node.value != nil {
-				db_iter.key = slice.clone(db_iter.mem_iter.node.key)
-				db_iter.value = slice.clone(db_iter.mem_iter.node.value)
+				append(&db_iter.key_buf, ..db_iter.mem_iter.node.key)
+				db_iter.key = db_iter.key_buf[:]
 
-
+				append(&db_iter.value_buf, ..db_iter.mem_iter.node.value)
+				db_iter.value = db_iter.value_buf[:]
 			}
 			// move iterator forward
 			db_iter.mem_iter.node = db_iter.mem_iter.node.next[0] // looks long but basically go to the mem_iter, get the node, set it to the next key in level 0
@@ -148,10 +149,11 @@ db_iterator_next :: proc(db_iter: ^DBIterator) {
 						continue
 					} else { 	// we found the winner and it is not a tombstone
 						found_winner = true // we set found winner to true
-						db_iter.key = slice.clone(it.key)
-						db_iter.value = slice.clone(it.value)
+						append(&db_iter.key_buf, ..it.key)
+						db_iter.key = db_iter.key_buf[:]
 
-
+						append(&db_iter.value_buf, ..it.value)
+						db_iter.value = db_iter.value_buf[:]
 					}
 					//we move that iterator forward
 					sstable_iterator_next(it)
@@ -178,8 +180,8 @@ db_iterator_next :: proc(db_iter: ^DBIterator) {
 }
 
 db_iterator_close :: proc(db_iter: ^DBIterator) {
-	if db_iter.key != nil {delete(db_iter.key)}
-	if db_iter.value != nil {delete(db_iter.value)}
+	delete(db_iter.key_buf)
+	delete(db_iter.value_buf)
 	if db_iter.end_key != nil {delete(db_iter.end_key)}
 	for iter in db_iter.sst_iters {
 		sstable_iterator_close(iter)

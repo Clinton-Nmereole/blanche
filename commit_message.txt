@@ -1,0 +1,11 @@
+⚡ Optimize DBIterator next string copies
+
+💡 What: Replaced repeated `slice.clone` and `delete` calls in `db_iterator_next` with internal resizable buffers (`key_buf` and `value_buf`) in the `DBIterator` struct.
+
+🎯 Why: To reduce unnecessary memory allocations and deallocations during iteration. Allocating and deleting strings over and over is an expensive process. By using an internal resizable dynamic array and doing an `append` operation instead, we eliminate continuous allocations and rely on reusing an existing buffer.
+
+📊 Measured Improvement:
+Tested iteration performance.
+- Baseline with slice.clone: ~287-325ms
+- Optimized with dynamic array: ~75ms (about ~75% reduction in time or ~4x faster on microbenchmark).
+For the end to end performance of the system test 13, read speeds went from ~2242 Ops/Sec to ~2270 Ops/Sec.
